@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>运动想象 EEG 数据采集</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20261016">
+</head>
+<body>
+  <main id="app">
+    <section id="modeView" class="view information-view">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">MOTOR IMAGERY EEG</p>
+          <h1>选择采集模式</h1>
+        </div>
+        <p class="header-note">Motren_E · 8 channels · 250 Hz</p>
+      </header>
+      <div class="mode-selection">
+        <button id="pureModeButton" class="mode-card" type="button">
+          <strong>pure_MI</strong>
+          <span>纯运动想象</span>
+          <p>按照左右箭头进行运动想象。</p>
+        </button>
+        <button id="tactileModeButton" class="mode-card" type="button">
+          <strong>tactile_MI</strong>
+          <span>触觉辅助运动想象</span>
+          <p>运动想象期间，同侧手腕接受高低交替震动。</p>
+        </button>
+      </div>
+    </section>
+
+    <section id="informationView" class="view information-view" hidden>
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">MOTOR IMAGERY EEG</p>
+          <h1>受试者与实验信息</h1>
+        </div>
+        <button id="changeModeButton" class="secondary-button" type="button">
+          重新选择模式
+        </button>
+      </header>
+
+      <form id="sessionForm" class="session-form">
+        <div class="form-introduction">
+          <h2>新建采集实验 · <span id="selectedMode">pure_MI</span></h2>
+          <p>确认后启动脑电设备连接。实验数据文件夹必须为空，已有文件不会被覆盖。</p>
+        </div>
+
+        <div class="form-grid">
+          <label class="field">
+            <span>受试者编号</span>
+            <input id="subjectId" name="subject_id" type="text" maxlength="80"
+                   autocomplete="off" placeholder="例如 S001" required>
+          </label>
+
+          <label class="field">
+            <span>实验日期</span>
+            <input id="experimentDate" name="experiment_date" type="date" required>
+          </label>
+
+          <label class="field">
+            <span>左手 trial 数</span>
+            <input id="leftTrials" name="left_trials" type="number"
+                   min="0" max="10000" step="1" value="50" required>
+          </label>
+
+          <label class="field">
+            <span>右手 trial 数</span>
+            <input id="rightTrials" name="right_trials" type="number"
+                   min="0" max="10000" step="1" value="50" required>
+          </label>
+
+          <label class="field">
+            <span>每 N 个 trial 闭眼休息一次</span>
+            <input id="breakEveryTrials" name="break_every_trials" type="number"
+                   min="1" max="10000" step="1" value="20" required>
+          </label>
+
+          <label id="hapticIntensityField" class="field field-wide" hidden>
+            <span>震动强度（高档） <output id="hapticIntensityValue">0.80</output></span>
+            <input id="hapticIntensity" name="haptic_intensity" type="range"
+                   min="0" max="1" step="0.01" value="0.8">
+            <small>每 0.25 秒切换一次：高档与低档
+              <output id="hapticLowValue">0.65</output> 交替；低档最低为 0。</small>
+          </label>
+
+          <label class="field field-wide">
+            <span>实验描述</span>
+            <textarea id="description" name="description" rows="4"
+                      maxlength="4000" placeholder="可选"></textarea>
+          </label>
+
+          <label class="field field-wide">
+            <span>实验数据记录文件夹（绝对路径）</span>
+            <input id="outputDir" name="output_dir" type="text"
+                   autocomplete="off"
+                   placeholder="例如 /Users/name/EEG_data/S001 或 C:\EEG_data\S001" required>
+          </label>
+        </div>
+
+        <div id="formError" class="inline-message error-message" hidden></div>
+        <div class="form-actions">
+          <span id="trialSummary">共 100 个 trial，预计记录 13 分 20 秒</span>
+          <button id="confirmButton" class="primary-button" type="submit">
+            确认并连接设备
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <section id="deviceView" class="view device-view" hidden>
+      <header class="device-header">
+        <div>
+          <p id="deviceKicker" class="eyebrow">SIGNAL CHECK</p>
+          <h1 id="deviceTitle">设备与信号检查</h1>
+        </div>
+        <div class="device-actions">
+          <div id="deviceStatus" class="device-status" data-connected="false">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="deviceStatusText">正在启动采集服务</span>
+          </div>
+          <div id="breakTimer" class="break-timer" hidden>
+            <span id="breakTimerStatus">闭眼休息</span>
+            <strong><span id="breakCountdown">30</span> s</strong>
+          </div>
+          <button id="editSessionButton" class="secondary-button" type="button">
+            修改信息
+          </button>
+          <button id="startButton" class="primary-button" type="button" disabled>
+            开始采集
+          </button>
+          <button id="breakToggleButton" class="primary-button" type="button" hidden>
+            暂停
+          </button>
+        </div>
+      </header>
+
+      <div id="sessionStrip" class="session-strip">
+        <span id="sessionSubject">--</span>
+        <span id="sessionTrials">--</span>
+        <span id="sessionPath">--</span>
+      </div>
+
+      <div id="deviceMessage" class="device-message" hidden>
+        <span id="deviceMessageText"></span>
+        <button id="newSessionButton" class="secondary-button" type="button">
+          新建实验
+        </button>
+      </div>
+
+      <div id="hapticPanel" class="haptic-panel" hidden>
+        <div class="haptic-statuses">
+          <span id="leftHapticStatus" class="device-status" data-connected="false">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="leftHapticText">HapticL · 等待连接</span>
+          </span>
+          <span id="rightHapticStatus" class="device-status" data-connected="false">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="rightHapticText">HapticR · 等待连接</span>
+          </span>
+          <small id="hapticMessage" aria-live="polite"></small>
+        </div>
+        <button id="hapticTestButton" class="secondary-button" type="button" disabled>
+          震动测试
+        </button>
+      </div>
+
+      <section class="waveform-area" aria-label="Eight channel EEG waveforms">
+        <canvas id="waveformCanvas"></canvas>
+      </section>
+
+      <footer class="signal-footer">
+        <span>50 Hz notch</span>
+        <span>5–30 Hz ×2</span>
+        <span>250 Hz</span>
+        <span>±50 uV</span>
+        <span id="packetStatus">Malformed packets: 0</span>
+      </footer>
+    </section>
+
+    <section id="experimentView" class="view experiment-view" hidden>
+      <div id="preparationContent" class="experiment-center preparation-content">
+        <p class="experiment-label">准备采集</p>
+        <div class="fixation-cross" aria-label="Fixation cross">
+          <span></span>
+          <span></span>
+        </div>
+        <strong id="preparationCountdown" class="preparation-countdown">5</strong>
+      </div>
+
+      <div id="restContent" class="experiment-center rest-content" hidden>
+        <h1>休息</h1>
+        <p id="remainingTrials">剩余 -- 个 trial</p>
+      </div>
+
+      <div id="cueContent" class="experiment-center cue-content" hidden>
+        <div id="directionArrow" class="direction-arrow" data-direction="left"
+             role="img" aria-label="Left arrow">
+          <span class="arrow-shaft"></span>
+          <span class="arrow-head"></span>
+        </div>
+      </div>
+
+      <div id="breakInstructionContent" class="experiment-center break-instruction-content"
+           hidden>
+        <h1>请闭眼休息30s</h1>
+      </div>
+
+      <div id="experimentProgress" class="experiment-progress" hidden>
+        <span id="experimentProgressFill"></span>
+      </div>
+    </section>
+
+    <section id="completeView" class="view complete-view" hidden>
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">ACQUISITION COMPLETE</p>
+          <h1>实验数据已保存</h1>
+        </div>
+      </header>
+      <div class="complete-content">
+        <div class="completion-mark" aria-hidden="true"></div>
+        <h2>采集完成</h2>
+        <p id="completePath" class="complete-path"></p>
+        <dl class="result-list">
+          <div>
+            <dt>记录采样点</dt>
+            <dd id="recordedSamples">--</dd>
+          </div>
+          <div>
+            <dt>数据覆盖率</dt>
+            <dd id="dataCoverage">--</dd>
+          </div>
+          <div>
+            <dt>完成 trial</dt>
+            <dd id="completedTrials">--</dd>
+          </div>
+          <div>
+            <dt>异常数据包</dt>
+            <dd id="malformedDuringSession">--</dd>
+          </div>
+        </dl>
+        <button id="completeNewButton" class="primary-button" type="button">
+          新建实验
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <noscript>该采集页面需要启用 JavaScript。</noscript>
+  <script src="/static/app.js?v=20261016"></script>
+</body>
+</html>

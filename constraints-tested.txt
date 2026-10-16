@@ -1,0 +1,11 @@
+# macOS / Python 3.11 / EEG_hardware 的已验证直接依赖版本。
+# 可选：python -m pip install -r requirements.txt -c constraints-tested.txt
+# 不锁定 pyobjc、WinRT 等平台专用依赖，由 Bleak 自动选择。
+bleak==1.1.1
+fastapi==0.141.1
+h5py==3.16.0
+numpy==2.4.6
+pydantic==2.13.5
+scipy==1.17.1
+uvicorn==0.53.0
+websockets==17.1

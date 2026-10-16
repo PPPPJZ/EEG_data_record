@@ -1,0 +1,109 @@
+"""集中定义运动想象采集系统的固定参数。"""
+
+from __future__ import annotations
+
+from typing import Final
+
+# EEG 设备与数据格式
+TARGET_DEVICE_NAME: Final = "Motren_E"
+EEG_DATA_UUID: Final = "fec26ec4-6d71-4442-9f81-55bc21d658d6"
+CONTROL_UUID: Final = "7812a8f6-515a-4698-8bdc-a751b65c8e2c"
+START_ACQUISITION: Final = b"\x02"
+STOP_ACQUISITION: Final = b"\x03"
+
+CHANNEL_COUNT: Final = 8
+CHANNEL_LABELS: Final = tuple(f"CH{index}" for index in range(1, 9))
+SAMPLE_RATE_HZ: Final = 250
+SAMPLES_PER_PACKET: Final = 5
+ADC_UV_PER_LSB: Final = (4.5 / 8.0) * 1_000_000.0 / (2**23)
+
+# 实时滤波，沿用 pure_MI 的两级带通
+NOTCH_HZ: Final = 50.0
+NOTCH_Q: Final = 30.0
+BANDPASS_LOW_HZ: Final = 5.0
+BANDPASS_HIGH_HZ: Final = 30.0
+BANDPASS_ORDER: Final = 4
+BANDPASS_CASCADE_COUNT: Final = 2
+
+# 实验时序
+PREPARATION_SECONDS: Final = 5.0
+REST_SECONDS: Final = 2.5
+CUE_SECONDS: Final = 1.5
+IMAGERY_BLACK_SECONDS: Final = 4.0
+TASK_SECONDS: Final = CUE_SECONDS + IMAGERY_BLACK_SECONDS
+TRIAL_SECONDS: Final = REST_SECONDS + TASK_SECONDS
+DEFAULT_BREAK_EVERY_TRIALS: Final = 20
+BREAK_INSTRUCTION_SECONDS: Final = 3.0
+BREAK_COUNTDOWN_SECONDS: Final = 30.0
+BREAK_CHIME_REMAINING_SECONDS: Final = 6.0
+
+# 类别与事件编码
+CLASS_NONE: Final = -1
+CLASS_LEFT: Final = 0
+CLASS_RIGHT: Final = 1
+CLASS_NAMES: Final = {
+    CLASS_LEFT: "left_hand",
+    CLASS_RIGHT: "right_hand",
+}
+
+# 实验模式与触觉刺激；每 0.25 s 切换一次，完整高低周期为 0.5 s
+MODE_PURE_MI: Final = "pure_MI"
+MODE_TACTILE_MI: Final = "tactile_MI"
+HAPTIC_DEVICE_NAMES: Final = {CLASS_LEFT: "HapticL", CLASS_RIGHT: "HapticR"}
+HAPTIC_LEVEL_UUID: Final = "a2300001-4d18-4d1c-86b6-6c4b5d0134a1"
+DEFAULT_HAPTIC_INTENSITY: Final = 0.8
+HAPTIC_INTENSITY_DIFFERENCE: Final = 0.15
+HAPTIC_STEP_SECONDS: Final = 0.25
+HAPTIC_TEST_SECONDS: Final = 2.0
+HAPTIC_WRITE_TIMEOUT_SECONDS: Final = 1.0
+HAPTIC_CONNECT_TIMEOUT_SECONDS: Final = 15.0
+
+EVENT_RECORDING_START: Final = 100
+EVENT_TRIAL_START: Final = 110
+EVENT_CUE_LEFT: Final = 210
+EVENT_CUE_RIGHT: Final = 220
+EVENT_CUE_END: Final = 300
+EVENT_TRIAL_END: Final = 400
+EVENT_BREAK_INSTRUCTION_START: Final = 500
+EVENT_BREAK_MONITOR_START: Final = 510
+EVENT_BREAK_PAUSED: Final = 520
+EVENT_BREAK_COUNTDOWN_RESTARTED: Final = 530
+EVENT_BREAK_CHIME: Final = 540
+EVENT_BREAK_END: Final = 550
+EVENT_BREAK_DEVICE_DISCONNECTED: Final = 560
+EVENT_BREAK_SIGNAL_RESTORED: Final = 570
+EVENT_RECORDING_COMPLETE: Final = 900
+EVENT_RECORDING_ABORTED: Final = 990
+EVENT_NAMES: Final = {
+    EVENT_RECORDING_START: "recording_start",
+    EVENT_TRIAL_START: "trial_start_rest",
+    EVENT_CUE_LEFT: "cue_left",
+    EVENT_CUE_RIGHT: "cue_right",
+    EVENT_CUE_END: "cue_end_imagery_black_start",
+    EVENT_TRIAL_END: "trial_end",
+    EVENT_BREAK_INSTRUCTION_START: "break_instruction_start",
+    EVENT_BREAK_MONITOR_START: "break_monitor_start",
+    EVENT_BREAK_PAUSED: "break_paused",
+    EVENT_BREAK_COUNTDOWN_RESTARTED: "break_countdown_restarted",
+    EVENT_BREAK_CHIME: "break_chime",
+    EVENT_BREAK_END: "break_end",
+    EVENT_BREAK_DEVICE_DISCONNECTED: "break_device_disconnected",
+    EVENT_BREAK_SIGNAL_RESTORED: "break_signal_restored",
+    EVENT_RECORDING_COMPLETE: "recording_complete",
+    EVENT_RECORDING_ABORTED: "recording_aborted",
+}
+
+# 实时服务
+PREVIEW_SECONDS: Final = 5
+DISPLAY_LIMIT_UV: Final = 50.0
+SAMPLE_BROADCAST_HZ: Final = 15.0
+STATE_BROADCAST_HZ: Final = 20.0
+SCAN_TIMEOUT_SECONDS: Final = 10.0
+RECONNECT_DELAY_SECONDS: Final = 2.0
+
+# 数据存储
+DATA_FILENAME: Final = "motor_imagery.h5"
+SESSION_README_FILENAME: Final = "README.md"
+HDF5_SCHEMA_NAME: Final = "motren_motor_imagery"
+HDF5_SCHEMA_VERSION: Final = "1.2"
+HDF5_WRITE_BLOCK_SAMPLES: Final = SAMPLE_RATE_HZ
