@@ -1,0 +1,134 @@
+# 独立 ADFCNN：Windows 训练与 Feedback 推理
+
+直接复制整个 `adfcnn` 文件夹即可运行。模型、H5 解析、预处理、训练和推理均在当前文件夹内，不导入 A-EEG 的其他代码，不需要原服务器路径。外部只需要数据文件、NVIDIA GPU 和 `requirements.txt` 中的依赖。
+
+## Windows 环境
+
+推荐 64 位 Windows 10/11、Python 3.11、NVIDIA GPU，以及支持 CUDA 12.8 的 NVIDIA 驱动。在 Anaconda Prompt 或已初始化 conda 的 PowerShell 中执行：
+
+```powershell
+conda create -n adfcnn python=3.11 pip -y
+conda activate adfcnn
+cd "D:\your_project\adfcnn"
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('GPU available:', torch.cuda.is_available())"
+```
+
+`requirements.txt` 固定 PyTorch 2.11.0 + CUDA 12.8，并指定官方 CUDA wheel 下载源，避免装成 CPU 版。PyTorch wheel 已包含所需 CUDA 运行时，无需安装 CUDA Toolkit。最后一条命令的 `GPU available` 应为 `True`。环境创建后，三个入口都使用 `cuda:0`，可通过 `--device cuda:1` 选择其他 GPU。
+
+Linux 使用同样的 Python 环境和安装命令。迁移到另一台机器时重新创建环境、安装依赖，复制代码和 teacher 文件即可；不需要复制服务器上的 conda 目录。当前已在 Linux Python 3.11 + NVIDIA GPU 上验证，Windows wheel 可用，尚未在 Windows 实机执行。
+
+## results：15 次实验，只打印平均准确率
+
+```powershell
+python results.py --data "D:\data_record\Haoyu_Xu\pure_MI_1\motor_imagery.h5"
+```
+
+默认训练 15 次，每次 300 epochs。stdout 最终只打印一行：
+
+```text
+Accuracy: xx.xx%
+```
+
+读取后先用固定 seed `42` 同步打乱 trial、标签和 trial ID。随后对实验 seed `42、2024、3407` 分别建立分层五折，每类尽量均匀分配，每折 trial 总数至多相差 1。test 依次为 fold 1–5，val 为 test 的下一折（fold 5 后回到 fold 1），其余三折训练。一个 seed 训练五次，所有 trial 各做一次 test，共 15 次实验。
+
+Accuracy 是 15 次 **Test Accuracy 的算术平均值**，每个 test Accuracy 来自验证集选出的最佳模型。不是训练集准确率，也不是所有预测合并后按 trial 数加权的准确率。每次实验都重新初始化模型、优化器和学习率调度器。
+
+results 不保存 checkpoint、日志、缓存、CSV、图表或 Python 字节码。最佳模型仅在内存中保留。执行期间如需要看到进度：
+
+```powershell
+python results.py --data "D:\data_record\Haoyu_Xu\pure_MI_1\motor_imagery.h5" --verbose
+```
+
+`--verbose` 将数据统计、每 25 epochs 的验证信息、各折 test Accuracy 输出到 stderr，stdout 仍只输出最后平均 Accuracy。不写日志文件。
+
+## teacher：一次训练，保存个人模型
+
+```powershell
+python teacher.py --data "D:\data_record\Haoyu_Xu\pure_MI_1\motor_imagery.h5"
+```
+
+teacher 固定 split seed `42`，只执行一次：fold 1=test、fold 2=val、fold 3–5=train。最佳模型通过验证集选择，随后在 test 上评估一次，不使用 test 调参，也不再用全量数据重训。默认输出：
+
+```text
+Accuracy: xx.xx%
+Model: D:\data_record\Haoyu_Xu\pure_MI_1\adfcnn_teacher.pt
+```
+
+`adfcnn_teacher.pt` 默认保存到实际输入 H5 的所在目录，不使用 H5 metadata 中原采集机器的 `output_dir`。再次运行会原子替换同名模型。需要保留已有模型或改变位置时指定输出文件：
+
+```powershell
+python teacher.py --data "D:\data_record\Haoyu_Xu\pure_MI_1\motor_imagery.h5" --output "D:\models\Haoyu_Xu_v2.pt" --verbose
+```
+
+模型文件含 CPU 权重、网络配置、完整预处理参数、通道/类别约定、最佳 epoch、val/test Accuracy、划分 seed、各组 trial ID 和软件版本。`Predictor` 使用这些信息恢复推理流程，加载时不依赖训练 H5、原始数据路径或训练机器的 GPU 编号。文件中的 Accuracy 均以 `[0, 1]` 小数保存。
+
+## reasoning：原始 3 秒窗口分类
+
+输入必须为 **原始微伏 EEG**，形状严格为 `(750, 8)`，250 Hz，列顺序 `CH1–CH8`，包含完整 cue 后 3 秒数据。不要传入软件已经滤波、裁剪、标准化的信号，不要转置，也不要包含标签列。
+
+分类 ID：`0=left_hand`（左手），`1=right_hand`（右手）。
+
+Feedback 集成时，在程序启动时加载一次模型，每收到一个完整窗口调用一次：
+
+```python
+import numpy as np
+from reasoning import Predictor
+
+predictor = Predictor(r"D:\data_record\Haoyu_Xu\pure_MI_1\adfcnn_teacher.pt", device="cuda:0")
+
+# raw_window_uv 由实际采集程序提供，shape=(750, 8)，单位 uV。
+raw_window_uv = np.asarray(raw_window_uv, dtype=np.float32)
+class_id = predictor.predict(raw_window_uv)
+
+# 如果 Feedback 还需要类别名称和概率：
+result = predictor.predict_details(raw_window_uv)
+print(result.class_id, result.class_name, result.probabilities)
+# probabilities 的顺序固定为 (left_hand, right_hand)。
+```
+
+上例调用方可在 `adfcnn` 中运行；若外部程序与 `adfcnn` 同级，也可 `from adfcnn.adfcnn_lib.inference import Predictor`。无需修改库里的路径。`predict` 每次返回 Python `int`；概率为 softmax 输出，未做置信度校准。
+
+命令行读取 `.npy`：
+
+```powershell
+python reasoning.py --model "D:\data_record\Haoyu_Xu\pure_MI_1\adfcnn_teacher.pt" --window "D:\windows\raw_3s.npy"
+```
+
+默认仅输出 `0` 或 `1`。附加 `--details` 则输出一行 JSON：
+
+```json
+{"class_id": 0, "class_name": "left_hand", "probabilities": [0.7, 0.3]}
+```
+
+## 信号处理和训练协议
+
+H5 必须包含 `metadata/json`、`protocol/json`、`eeg/raw_uv`、`trials/table`。直接读取 trial 的 `class_id`、`completed`、`cue_start_sample`、`trial_end_sample`；不根据预定执行序列推断标签或时间。
+
+1. 仅保留已完成、类别为 0/1、边界有效、含完整 750 点窗口的 trial。未完成文件也可训练，只使用有效 trial；每类至少需要 5 个。有效窗口含 NaN/Inf 则报错，不静默补零。
+2. 从 `cue_start_sample` 取左闭右开切片 `[start:start+750]`。3 秒按 750 点定义，不增加第 751 点，不重采样。
+3. 每个窗口独立进行 40 Hz 零相位 FIR 低通（MNE，Hamming/firwin，自动滤波长度和过渡带，边缘使用 reflect_limited）。训练和推理调用同一函数，不使用窗口之外的数据，不跨 trial 或组间休息滤波。
+4. 每个窗口、每个通道独立标准化：`(x - mean) / max(std, 1e-4)`，std 使用 `ddof=0`，输出 float32 `(1, 8, 750)`。不跨 trial 计算均值/方差，不在全部数据上拟合 scaler。
+5. ADFCNN 保留参考实现的双分支和注意力计算：8 个特征，dropout 0.25，卷积 max norm 2.0；两路池化合计 51 个位置，分类器输出两类 log-softmax。
+6. 训练 300 epochs，batch size 16，Adam，学习率 0.001，weight decay 0.075；CosineAnnealingLR，`T_max=epochs`、`eta_min=0`，CrossEntropyLoss。选择 validation accuracy 最大的模型，accuracy 相同时选 validation loss 更低者；完全相同则保留较早 epoch。test 只在模型选择后评估一次。
+
+旧 inner-session 代码曾使用 751 点窗口，并存在连续 block 滤波路径。本实现按照本次确认使用 750 点和窗口独立滤波，因此保证训练与实时窗口推理一致；其结果不应被视为旧预处理结果的逐数值复现。
+
+划分 seed 不依赖文件名或路径。每折训练 seed 为 `split_seed + test_fold - 1`；teacher 与 results 的 seed 42 / test fold 1 完全一致。固定 Python、NumPy、PyTorch 随机种子及确定性算法。同一软件和硬件环境下可重复；不同 GPU 或依赖版本之间不保证浮点结果逐位一致。
+
+## 参数位置与快速检查
+
+`results.py` 和 `teacher.py` 顶部各有独立的参数配置区。读取 seed、三个 results seed、teacher seed 和五折数在 `adfcnn_lib/config.py` 明确列出。命令行支持 `--device`、`--epochs`、`--batch-size`；正式实验使用默认 300 epochs。
+
+仅检查程序能否跑通时，可以减少 epochs：
+
+```powershell
+python results.py --data "D:\data_record\Haoyu_Xu\pure_MI_1\motor_imagery.h5" --epochs 1 --verbose
+python teacher.py --data "D:\data_record\Haoyu_Xu\pure_MI_1\motor_imagery.h5" --epochs 1 --output "D:\temp\smoke_teacher.pt"
+python -B -m unittest discover -s tests -v
+```
+
+无 GPU 时可显式指定 `--device cpu` 做调试；默认不会自动退回 CPU。
+
+目录中的 `tests` 使用临时合成 H5 验证 trial 与标签对齐、分层和互斥划分、预处理一致性，以及模型保存/加载；不把测试输出写到数据目录。

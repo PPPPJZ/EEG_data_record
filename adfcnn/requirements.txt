@@ -1,0 +1,9 @@
+# 推荐 Python 3.11、64 位 Windows/Linux、NVIDIA GPU。
+# CUDA 12.8 运行时由 PyTorch wheel 提供，无需另装 CUDA Toolkit。
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+numpy==2.4.6
+scipy==1.17.1
+h5py==3.16.0
+scikit-learn==1.9.0
+mne==1.12.1
