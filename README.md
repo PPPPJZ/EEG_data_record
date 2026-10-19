@@ -52,8 +52,12 @@ python app.py
 已有同名环境时，使用上面的 `pip install -r requirements.txt`，无需重建。
 也可以自行创建虚拟环境，然后安装 `requirements.txt`。
 
-`requirements.txt` 显式包含 Pydantic 和 WebSocket 依赖，不需要 Node.js 或前端
-构建。若希望复用本次 macOS / Python 3.11 下验证的直接依赖版本：
+`requirements.txt` 显式包含 Pydantic、WebSocket 和 `adfcnn` 所需依赖，不需要
+Node.js 或前端构建。Windows/Linux 会安装 PyTorch 2.11.0 + CUDA 12.8 wheel，
+其中已包含 CUDA 运行时，无需另装 CUDA Toolkit；ADFCNN 使用 GPU 时仍需兼容
+CUDA 12.8 的 NVIDIA 驱动。macOS 安装同版本的 CPU PyTorch。
+
+若希望复用本次 macOS / Python 3.11 下验证的数采直接依赖版本：
 
 ```bash
 python -m pip install -r requirements.txt -c constraints-tested.txt
@@ -238,11 +242,12 @@ eeg.py                    BLE EEG 解码、滤波、重连和模拟源
 haptics.py                双马达连接、测试、定时刺激和停止
 storage.py                HDF5 写入及实验 README
 load_session.py           读取、trial 切片及可选 CSV 导出
+adfcnn/                   ADFCNN 训练、teacher 模型保存和 Feedback 推理
 static/                   无构建依赖的网页界面
 templates/                每次实验的中文说明模板
 BLE/haptic_control.py     单马达手动调试工具
 tests/                    自动验证
-requirements.txt          跨平台 Python 依赖范围
+requirements.txt          数采与 ADFCNN 的统一 Python 依赖
 constraints-tested.txt    本次验证的直接依赖版本
 environment.yml           conda 新环境配置
 ```

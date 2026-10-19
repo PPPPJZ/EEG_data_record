@@ -4,5 +4,6 @@ channels:
 dependencies:
   - python=3.11
   - pip
+  # 统一安装数采、ADFCNN 训练和 Feedback 推理依赖。
   - pip:
       - -r requirements.txt
