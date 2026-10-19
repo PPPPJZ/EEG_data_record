@@ -1,23 +1,22 @@
-# 独立 ADFCNN：Windows 训练与 Feedback 推理
+# ADFCNN：Windows 训练与 Feedback 推理
 
-直接复制整个 `adfcnn` 文件夹即可运行。模型、H5 解析、预处理、训练和推理均在当前文件夹内，不导入 A-EEG 的其他代码，不需要原服务器路径。外部只需要数据文件、NVIDIA GPU 和 `requirements.txt` 中的依赖。
+本目录是 `EEG_data_record` 的 ADFCNN 模块。模型、H5 解析、预处理、训练和推理代码均在本目录内，不导入项目的其他 Python 模块。Python 环境由项目根目录的 `environment.yml` 和 `requirements.txt` 统一管理。
 
 ## Windows 环境
 
 推荐 64 位 Windows 10/11、Python 3.11、NVIDIA GPU，以及支持 CUDA 12.8 的 NVIDIA 驱动。在 Anaconda Prompt 或已初始化 conda 的 PowerShell 中执行：
 
 ```powershell
-conda create -n adfcnn python=3.11 pip -y
-conda activate adfcnn
-cd "D:\your_project\adfcnn"
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+cd "D:\your_project\EEG_data_record"
+conda env create -f environment.yml
+conda activate EEG_hardware
 python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('GPU available:', torch.cuda.is_available())"
+cd adfcnn
 ```
 
-`requirements.txt` 固定 PyTorch 2.11.0 + CUDA 12.8，并指定官方 CUDA wheel 下载源，避免装成 CPU 版。PyTorch wheel 已包含所需 CUDA 运行时，无需安装 CUDA Toolkit。最后一条命令的 `GPU available` 应为 `True`。环境创建后，三个入口都使用 `cuda:0`，可通过 `--device cuda:1` 选择其他 GPU。
+根目录 `requirements.txt` 固定 PyTorch 2.11.0 + CUDA 12.8，并指定官方 CUDA wheel 下载源，避免在 Windows/Linux 上装成 CPU 版。PyTorch wheel 已包含所需 CUDA 运行时，无需安装 CUDA Toolkit。最后一条检查命令的 `GPU available` 应为 `True`。环境创建后，三个入口都使用 `cuda:0`，可通过 `--device cuda:1` 选择其他 GPU。
 
-Linux 使用同样的 Python 环境和安装命令。迁移到另一台机器时重新创建环境、安装依赖，复制代码和 teacher 文件即可；不需要复制服务器上的 conda 目录。当前已在 Linux Python 3.11 + NVIDIA GPU 上验证，Windows wheel 可用，尚未在 Windows 实机执行。
+Linux 使用同样的 Python 环境和安装命令。迁移到另一台机器时重新创建环境、安装依赖，复制项目和 teacher 文件即可；不需要复制服务器上的 conda 目录。训练流程已在 Linux Python 3.11 + NVIDIA GPU 上验证，推理流程已在 Windows Python 3.11 + NVIDIA GPU 上验证。
 
 ## results：15 次实验，只打印平均准确率
 
@@ -78,6 +77,9 @@ from reasoning import Predictor
 
 predictor = Predictor(r"D:\data_record\Haoyu_Xu\pure_MI_1\adfcnn_teacher.pt", device="cuda:0")
 
+# 在开始采集前预热一次，避免首个真实 Feedback 承担库初始化开销。
+predictor.predict(np.zeros((750, 8), dtype=np.float32))
+
 # raw_window_uv 由实际采集程序提供，shape=(750, 8)，单位 uV。
 raw_window_uv = np.asarray(raw_window_uv, dtype=np.float32)
 class_id = predictor.predict(raw_window_uv)
@@ -87,6 +89,8 @@ result = predictor.predict_details(raw_window_uv)
 print(result.class_id, result.class_name, result.probabilities)
 # probabilities 的顺序固定为 (left_hand, right_hand)。
 ```
+
+当前 Windows 11、Python 3.11.17、RTX 5060 Laptop GPU、PyTorch 2.11.0+cu128 环境下，使用真实 H5 单窗预热后重复 500 次，`predict_details()` 端到端中位数为 **2.44 ms**，P95 为 **2.58 ms**；其中模型前向中位数为 1.41 ms，其余主要为 FIR 预处理和数据传输。模型加载不计入上述时间。新进程中，模型加载后的首次调用因 MNE/PyTorch 延迟初始化约为 2.32 s，因此实时采集前必须完成上面的预热；具体时延会随硬件、驱动和系统负载变化。
 
 上例调用方可在 `adfcnn` 中运行；若外部程序与 `adfcnn` 同级，也可 `from adfcnn.adfcnn_lib.inference import Predictor`。无需修改库里的路径。`predict` 每次返回 Python `int`；概率为 softmax 输出，未做置信度校准。
 
@@ -108,7 +112,7 @@ H5 必须包含 `metadata/json`、`protocol/json`、`eeg/raw_uv`、`trials/table
 
 1. 仅保留已完成、类别为 0/1、边界有效、含完整 750 点窗口的 trial。未完成文件也可训练，只使用有效 trial；每类至少需要 5 个。有效窗口含 NaN/Inf 则报错，不静默补零。
 2. 从 `cue_start_sample` 取左闭右开切片 `[start:start+750]`。3 秒按 750 点定义，不增加第 751 点，不重采样。
-3. 每个窗口独立进行 40 Hz 零相位 FIR 低通（MNE，Hamming/firwin，自动滤波长度和过渡带，边缘使用 reflect_limited）。训练和推理调用同一函数，不使用窗口之外的数据，不跨 trial 或组间休息滤波。
+3. 每个窗口独立进行 40 Hz 零相位 FIR 低通（MNE，Hamming/firwin，自动滤波长度和过渡带，边缘使用 reflect\_limited）。训练和推理调用同一函数，不使用窗口之外的数据，不跨 trial 或组间休息滤波。
 4. 每个窗口、每个通道独立标准化：`(x - mean) / max(std, 1e-4)`，std 使用 `ddof=0`，输出 float32 `(1, 8, 750)`。不跨 trial 计算均值/方差，不在全部数据上拟合 scaler。
 5. ADFCNN 保留参考实现的双分支和注意力计算：8 个特征，dropout 0.25，卷积 max norm 2.0；两路池化合计 51 个位置，分类器输出两类 log-softmax。
 6. 训练 300 epochs，batch size 16，Adam，学习率 0.001，weight decay 0.075；CosineAnnealingLR，`T_max=epochs`、`eta_min=0`，CrossEntropyLoss。选择 validation accuracy 最大的模型，accuracy 相同时选 validation loss 更低者；完全相同则保留较早 epoch。test 只在模型选择后评估一次。
