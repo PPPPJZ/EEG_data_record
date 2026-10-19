@@ -1,0 +1,7 @@
+# 修改后重新确认实验信息生效。采样率、模型结构与 750 点窗口固定。
+inference_interval_ms: 40
+ema_alpha: 0.2
+dead_zone: 0.1
+max_velocity: 0.2
+cursor_min_x: 0.05
+cursor_max_x: 0.95

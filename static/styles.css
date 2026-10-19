@@ -113,7 +113,7 @@ textarea:focus-visible {
 
 .mode-selection {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 24px;
   width: min(920px, calc(100% - 40px));
   margin: 64px auto;
@@ -278,15 +278,43 @@ textarea:focus-visible {
 .device-view {
   min-height: 100vh;
   display: grid;
-  grid-template-rows: auto auto auto auto minmax(540px, 1fr) auto;
+  grid-template-rows: auto auto auto auto auto minmax(540px, 1fr) auto;
 }
 
 .device-view > .device-header { grid-row: 1; }
 .device-view > .session-strip { grid-row: 2; }
 .device-view > .device-message { grid-row: 3; }
 .device-view > .haptic-panel { grid-row: 4; }
-.device-view > .waveform-area { grid-row: 5; }
-.device-view > .signal-footer { grid-row: 6; }
+.device-view > #feedbackPreview { grid-row: 5; }
+.device-view > .waveform-area { grid-row: 6; }
+.device-view > .signal-footer { grid-row: 7; }
+
+.device-actions { flex-wrap: wrap; }
+.feedback-area { position: absolute; inset: 0; }
+.feedback-ball {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  left: 50%;
+  top: 50%;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: #2489ff;
+  box-shadow: 0 0 24px rgb(36 137 255 / 25%);
+  will-change: left;
+}
+.learning-counter {
+  position: absolute; top: 24px; left: 0; right: 0;
+  text-align: center; color: #b8b8b8; font-size: 16px;
+}
+#selfLearningRestPrompt { font-family: inherit; font-size: 24px; color: #eee; }
+#feedbackPreview { background: #fff; border-bottom: 1px solid #d7dde1; }
+.preview-toolbar {
+  display: flex; align-items: center; gap: 12px; padding: 12px 32px;
+  color: #68757e; font-size: 13px;
+}
+.preview-toolbar span { margin-right: auto; }
+.preview-track { position: relative; height: 100px; background: #0b111a; }
 
 .haptic-panel {
   display: flex;

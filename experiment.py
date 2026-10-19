@@ -30,6 +30,12 @@ from config import (
     HAPTIC_TEST_SECONDS,
     MODE_PURE_MI,
     MODE_TACTILE_MI,
+    MODE_SELF_LEARNING,
+    CLASS_NONE,
+    DEFAULT_LEARNING_TRIALS,
+    SELF_LEARNING_REST_SECONDS,
+    SELF_LEARNING_TASK_SECONDS,
+    SELF_LEARNING_TRIAL_SECONDS,
 )
 
 
@@ -45,6 +51,12 @@ class SessionConfig:
     random_seed: int
     experiment_mode: str = MODE_PURE_MI
     haptic_intensity: float = DEFAULT_HAPTIC_INTENSITY
+    learning_trials: int = DEFAULT_LEARNING_TRIALS
+    teacher_model_path: str = ""
+
+    @property
+    def self_learning_enabled(self) -> bool:
+        return self.experiment_mode == MODE_SELF_LEARNING
 
     @property
     def tactile_enabled(self) -> bool:
@@ -56,11 +68,15 @@ class SessionConfig:
 
     @property
     def total_trials(self) -> int:
+        if self.self_learning_enabled:
+            return self.learning_trials
         return self.left_trials + self.right_trials
 
     @property
     def expected_duration_seconds(self) -> float:
-        return self.total_trials * TRIAL_SECONDS
+        return self.total_trials * (
+            SELF_LEARNING_TRIAL_SECONDS if self.self_learning_enabled else TRIAL_SECONDS
+        )
 
     @property
     def scheduled_break_count(self) -> int:
@@ -95,7 +111,7 @@ class TrialPlan:
 
     @property
     def class_name(self) -> str:
-        return CLASS_NAMES[self.class_id]
+        return CLASS_NAMES.get(self.class_id, "unknown")
 
 
 def validate_form_values(
@@ -157,9 +173,21 @@ def create_session_config(
     random_seed: int | None = None,
     experiment_mode: str = MODE_PURE_MI,
     haptic_intensity: float = DEFAULT_HAPTIC_INTENSITY,
+    learning_trials: int = DEFAULT_LEARNING_TRIALS,
+    teacher_model_path: str = "",
+    mock_teacher: bool = False,
 ) -> SessionConfig:
-    if experiment_mode not in {MODE_PURE_MI, MODE_TACTILE_MI}:
-        raise ValueError("实验模式必须是 pure_MI 或 tactile_MI")
+    if experiment_mode not in {MODE_PURE_MI, MODE_TACTILE_MI, MODE_SELF_LEARNING}:
+        raise ValueError("不支持的实验模式")
+    learning = experiment_mode == MODE_SELF_LEARNING
+    if learning:
+        if not 1 <= learning_trials <= 10_000:
+            raise ValueError("自主学习 trial 数必须在 1–10000")
+        if not mock_teacher:
+            teacher = Path(teacher_model_path.strip()).expanduser()
+            if not teacher_model_path.strip() or not teacher.is_absolute() or not teacher.is_file():
+                raise ValueError("请输入存在的 teacher 模型文件绝对路径")
+            teacher_model_path = str(teacher.resolve())
     if not math.isfinite(haptic_intensity) or not 0.0 <= haptic_intensity <= 1.0:
         raise ValueError("震动强度必须是 0 到 1 之间的有限数值")
     (
@@ -174,8 +202,8 @@ def create_session_config(
         subject_id=subject_id,
         experiment_date=experiment_date,
         description=description,
-        left_trials=left_trials,
-        right_trials=right_trials,
+        left_trials=learning_trials if learning else left_trials,
+        right_trials=0 if learning else right_trials,
         break_every_trials=break_every_trials,
         output_dir=output_dir,
     )
@@ -183,17 +211,21 @@ def create_session_config(
         subject_id=clean_subject_id,
         experiment_date=clean_date,
         description=clean_description,
-        left_trials=clean_left,
-        right_trials=clean_right,
+        left_trials=0 if learning else clean_left,
+        right_trials=0 if learning else clean_right,
         break_every_trials=clean_break_every,
         output_dir=clean_output,
         random_seed=secrets.randbits(63) if random_seed is None else random_seed,
         experiment_mode=experiment_mode,
         haptic_intensity=round(haptic_intensity * 100) / 100,
+        learning_trials=learning_trials,
+        teacher_model_path=teacher_model_path if learning else "",
     )
 
 
 def build_trial_sequence(config: SessionConfig) -> list[int]:
+    if config.self_learning_enabled:
+        return [CLASS_NONE] * config.total_trials
     sequence = [CLASS_LEFT] * config.left_trials
     sequence.extend([CLASS_RIGHT] * config.right_trials)
     random.Random(config.random_seed).shuffle(sequence)
@@ -203,16 +235,19 @@ def build_trial_sequence(config: SessionConfig) -> list[int]:
 def build_trial_plans(
     sequence: list[int],
     break_every_trials: int = DEFAULT_BREAK_EVERY_TRIALS,
+    *,
+    experiment_mode: str = MODE_PURE_MI,
 ) -> list[TrialPlan]:
     if break_every_trials <= 0:
         raise ValueError("break_every_trials must be positive")
     plans: list[TrialPlan] = []
+    learning = experiment_mode == MODE_SELF_LEARNING
     for zero_based_index, class_id in enumerate(sequence):
-        if class_id not in {CLASS_LEFT, CLASS_RIGHT}:
+        if class_id not in ({CLASS_NONE} if learning else {CLASS_LEFT, CLASS_RIGHT}):
             raise ValueError(f"unsupported class id: {class_id}")
-        rest_start = zero_based_index * TRIAL_SECONDS
-        cue_start = rest_start + REST_SECONDS
-        cue_end = cue_start + CUE_SECONDS
+        rest_start = zero_based_index * (SELF_LEARNING_TRIAL_SECONDS if learning else TRIAL_SECONDS)
+        cue_start = rest_start + (SELF_LEARNING_REST_SECONDS if learning else REST_SECONDS)
+        cue_end = cue_start if learning else cue_start + CUE_SECONDS
         plans.append(
             TrialPlan(
                 trial_id=zero_based_index + 1,
@@ -221,7 +256,10 @@ def build_trial_plans(
                 planned_rest_start_s=rest_start,
                 planned_cue_start_s=cue_start,
                 planned_cue_end_s=cue_end,
-                planned_trial_end_s=cue_end + IMAGERY_BLACK_SECONDS,
+                planned_trial_end_s=(
+                    cue_start + SELF_LEARNING_TASK_SECONDS if learning
+                    else cue_end + IMAGERY_BLACK_SECONDS
+                ),
             )
         )
     return plans
@@ -234,8 +272,11 @@ def protocol_dict(
     haptic_intensity: float = DEFAULT_HAPTIC_INTENSITY,
 ) -> dict:
     tactile = experiment_mode == MODE_TACTILE_MI
+    learning = experiment_mode == MODE_SELF_LEARNING
     return {
         "experiment_mode": experiment_mode,
+        "instruction": "none; subject chooses privately" if learning else "left/right visual cue",
+        "trial_class_id": "-1 unknown; teacher predictions are not labels" if learning else "instruction",
         "haptic_stimulation": {
             "enabled": tactile,
             "motor_names": {str(key): value for key, value in HAPTIC_DEVICE_NAMES.items()},
@@ -254,11 +295,11 @@ def protocol_dict(
             "break_test_behavior": "freeze countdown during test; then resume",
             "synchronization": "software scheduled; BLE acknowledgement is not physical onset",
         },
-        "rest_seconds": REST_SECONDS,
-        "cue_visible_seconds": CUE_SECONDS,
-        "imagery_black_seconds": IMAGERY_BLACK_SECONDS,
-        "motor_imagery_window_seconds": TASK_SECONDS,
-        "trial_seconds": TRIAL_SECONDS,
+        "rest_seconds": SELF_LEARNING_REST_SECONDS if learning else REST_SECONDS,
+        "cue_visible_seconds": 0 if learning else CUE_SECONDS,
+        "imagery_black_seconds": 0 if learning else IMAGERY_BLACK_SECONDS,
+        "motor_imagery_window_seconds": SELF_LEARNING_TASK_SECONDS if learning else TASK_SECONDS,
+        "trial_seconds": SELF_LEARNING_TRIAL_SECONDS if learning else TRIAL_SECONDS,
         "break_every_trials": break_every_trials,
         "break_instruction_seconds": BREAK_INSTRUCTION_SECONDS,
         "break_countdown_seconds": BREAK_COUNTDOWN_SECONDS,

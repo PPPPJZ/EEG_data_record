@@ -7,6 +7,7 @@ fastapi>=0.115,<1
 h5py==3.16.0
 numpy==2.4.6
 pydantic>=2.7,<3
+PyYAML>=6.0.2,<7
 scipy==1.17.1
 uvicorn>=0.30,<1
 # 显式提供实时波形 WebSocket 支持，避免依赖 uvicorn 的可选加速扩展。

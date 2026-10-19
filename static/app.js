@@ -12,6 +12,7 @@ const ACTIVE_STAGES = new Set([
   "rest",
   "cue",
   "imagery",
+  "self_learning",
   "break_instruction",
   "break_monitor",
 ]);
@@ -76,6 +77,8 @@ let audioContext = null;
 let lastChimeSerial = null;
 let selectedMode = null;
 let hapticRequestError = "";
+let modelRequestError = "";
+let feedbackReceivedAt = 0;
 
 function localDateString() {
   const now = new Date();
@@ -114,6 +117,8 @@ function chooseMode(mode) {
   selectedMode = mode;
   document.getElementById("selectedMode").textContent = mode;
   document.getElementById("hapticIntensityField").hidden = mode !== "tactile_MI";
+  updateModeFields();
+  updateTrialSummary();
   updateHapticIntensity();
   showOnly(informationView);
 }
@@ -122,6 +127,23 @@ document.getElementById("pureModeButton")
   .addEventListener("click", () => chooseMode("pure_MI"));
 document.getElementById("tactileModeButton")
   .addEventListener("click", () => chooseMode("tactile_MI"));
+document.getElementById("selfLearningModeButton")
+  .addEventListener("click", () => chooseMode("self_learning"));
+
+function updateModeFields() {
+  const learning = selectedMode === "self_learning";
+  for (const name of ["leftTrials", "rightTrials"]) {
+    document.getElementById(`${name}Field`).hidden = learning;
+    document.getElementById(name).disabled = learning;
+  }
+  for (const [field, input] of [
+    ["learningTrialsField", "learningTrials"], ["teacherPathField", "teacherModelPath"],
+  ]) {
+    document.getElementById(field).hidden = !learning;
+    document.getElementById(input).disabled = !learning;
+    document.getElementById(input).required = learning;
+  }
+}
 document.getElementById("changeModeButton").addEventListener("click", () => {
   selectedMode = null;
   formError.hidden = true;
@@ -135,8 +157,10 @@ function updateTrialSummary() {
     document.getElementById("rightTrials").value,
     10,
   );
-  const total = Math.max(0, (Number.isFinite(left) ? left : 0)) +
-    Math.max(0, (Number.isFinite(right) ? right : 0));
+  const learning = selectedMode === "self_learning";
+  const total = learning ? Math.max(0, Number(document.getElementById("learningTrials").value))
+    : Math.max(0, (Number.isFinite(left) ? left : 0)) +
+      Math.max(0, (Number.isFinite(right) ? right : 0));
   const breakEvery = Number.parseInt(
     document.getElementById("breakEveryTrials").value,
     10,
@@ -146,7 +170,7 @@ function updateTrialSummary() {
   const breakCount = total > 0
     ? Math.floor((total - 1) / validBreakEvery)
     : 0;
-  const totalSeconds = total * TRIAL_SECONDS + breakCount * BREAK_SECONDS;
+  const totalSeconds = total * (learning ? 10 : TRIAL_SECONDS) + breakCount * BREAK_SECONDS;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   document.getElementById("trialSummary").textContent =
@@ -155,6 +179,7 @@ function updateTrialSummary() {
 
 document.getElementById("leftTrials").addEventListener("input", updateTrialSummary);
 document.getElementById("rightTrials").addEventListener("input", updateTrialSummary);
+document.getElementById("learningTrials").addEventListener("input", updateTrialSummary);
 document
   .getElementById("breakEveryTrials")
   .addEventListener("input", updateTrialSummary);
@@ -231,6 +256,8 @@ sessionForm.addEventListener("submit", async (event) => {
       10,
     ),
     output_dir: document.getElementById("outputDir").value,
+    learning_trials: Number(document.getElementById("learningTrials").value),
+    teacher_model_path: document.getElementById("teacherModelPath").value,
   };
 
   try {
@@ -240,6 +267,7 @@ sessionForm.addEventListener("submit", async (event) => {
       body: JSON.stringify(payload),
     });
     hapticRequestError = "";
+    modelRequestError = "";
   } catch (error) {
     formError.textContent = error.message;
     formError.hidden = false;
@@ -278,6 +306,7 @@ async function beginNewSession(chooseAgain = true) {
       selectedMode = null;
     }
     hapticRequestError = "";
+    modelRequestError = "";
     clearPreview();
     showOnly(selectedMode ? informationView : modeView);
   } catch (error) {
@@ -301,6 +330,29 @@ hapticTestButton.addEventListener("click", async () => {
   }
 });
 
+document.getElementById("modelTestButton").addEventListener("click", async () => {
+  modelRequestError = "";
+  document.getElementById("modelTestButton").disabled = true;
+  try {
+    await apiRequest("/api/self-learning/test", { method: "POST" });
+  } catch (error) {
+    modelRequestError = error.message;
+    document.getElementById("modelMessage").textContent = modelRequestError;
+  }
+});
+for (const action of ["start", "stop", "reset"]) {
+  document.getElementById(`preview${action[0].toUpperCase() + action.slice(1)}Button`)
+    .addEventListener("click", async () => {
+      try {
+        await apiRequest(`/api/self-learning/preview/${action}`, { method: "POST" });
+        modelRequestError = "";
+      } catch (error) {
+        modelRequestError = error.message;
+        document.getElementById("modelMessage").textContent = modelRequestError;
+      }
+    });
+}
+
 document.addEventListener("keydown", async (event) => {
   if (event.key !== "Escape" || !latestState) {
     return;
@@ -318,6 +370,7 @@ document.addEventListener("keydown", async (event) => {
 
 function updateState(state) {
   latestState = state;
+  feedbackReceivedAt = performance.now();
   deviceStatus.dataset.connected = String(state.device_connected);
   deviceStatusText.textContent = state.device_status;
   packetStatus.textContent = `Malformed packets: ${state.malformed_packets}`;
@@ -327,8 +380,27 @@ function updateState(state) {
     document.getElementById("hapticIntensityField").hidden = selectedMode !== "tactile_MI";
     hapticIntensity.value = String(state.haptic_intensity);
     updateHapticIntensity();
+    updateModeFields();
   }
   hapticPanel.hidden = !state.haptics;
+  const feedback = state.feedback;
+  document.getElementById("modelStatus").hidden = !feedback;
+  document.getElementById("modelPanel").hidden = !feedback;
+  document.getElementById("feedbackPreview").hidden = !feedback || state.stage !== "device_check";
+  if (feedback) {
+    document.getElementById("modelStatus").dataset.connected = String(feedback.ready);
+    document.getElementById("modelStatusText").textContent = feedback.status;
+    document.getElementById("modelTestButton").disabled = !state.can_test_model;
+    document.getElementById("modelTestButton").textContent = feedback.busy ? "模型测试中…" : "模型测试";
+    const test = feedback.test_result;
+    document.getElementById("modelMessage").textContent = modelRequestError || feedback.error ||
+      (test ? `${test.mock ? "模拟输出 · " : ""}10 条平均 ${test.mean_ms.toFixed(2)} ms/条 · 最大 ${test.max_ms.toFixed(2)} ms · ${test.within_interval ? "低于推理间隔" : "超过推理间隔"}` :
+        "模型测试：10 条随机原始窗口，包含 40 Hz 低通、标准化和分类，不含加载。");
+    document.getElementById("previewStartButton").disabled =
+      !feedback.ready || feedback.busy || feedback.enabled || !state.device_connected;
+    document.getElementById("previewStopButton").disabled = !feedback.enabled;
+    document.getElementById("previewResetButton").disabled = !feedback.ready || feedback.busy;
+  }
   if (state.haptics) {
     for (const motor of state.haptics.motors) {
       const side = motor.motor_id === 0 ? "left" : "right";
@@ -395,7 +467,7 @@ function updateState(state) {
     breakCountdown.textContent = String(state.break_remaining ?? 30);
     breakTimerStatus.textContent = state.break_paused
       ? "倒计时已暂停"
-      : (state.haptics?.busy ? "测试中，计时暂缓" : "闭眼休息");
+      : (state.haptics?.busy || state.feedback?.busy ? "测试中，计时暂缓" : "闭眼休息");
     startButton.hidden = true;
     editSessionButton.hidden = true;
     breakToggleButton.hidden = false;
@@ -436,6 +508,10 @@ function renderExperiment(state) {
   restContent.hidden = state.stage !== "rest";
   cueContent.hidden = state.stage !== "cue";
   breakInstructionContent.hidden = state.stage !== "break_instruction";
+  document.getElementById("selfLearningContent").hidden = state.stage !== "self_learning";
+  document.getElementById("selfLearningRestPrompt").hidden = state.experiment_mode !== "self_learning";
+  document.getElementById("learningCounter").textContent =
+    `第 ${state.trial_id} / ${state.total_trials} 个 trial · 剩余 ${state.remaining_trials} 个`;
   experimentProgress.hidden =
     state.stage === "preparing" || state.stage === "break_instruction";
 
@@ -607,6 +683,11 @@ function connectWebSocket() {
     startButton.disabled = true;
     hapticTestButton.disabled = true;
     breakToggleButton.disabled = true;
+    latestState = null;
+    document.getElementById("modelTestButton").disabled = true;
+    for (const id of ["previewStartButton", "previewStopButton", "previewResetButton"]) {
+      document.getElementById(id).disabled = true;
+    }
     window.setTimeout(connectWebSocket, 1000);
   });
 }
@@ -615,6 +696,25 @@ window.addEventListener("resize", () => {
   previewNeedsDraw = true;
   drawPreview();
 });
+
+// 60 Hz 渲染与 25 Hz teacher 推理解耦。服务器位置为权威，
+// 帧间仅按最新速度外推，连接或反馈过期后冻结。
+function drawFeedbackFrame(now) {
+  const feedback = latestState?.feedback;
+  if (feedback) {
+    const elapsed = Math.max(0, (now - feedbackReceivedAt) / 1000);
+    const dt = Math.min(elapsed, 0.1) / feedback.time_scale;
+    const x = Math.max(feedback.config.cursor_min_x, Math.min(
+      feedback.config.cursor_max_x,
+      feedback.cursor_x + (feedback.enabled ? feedback.velocity * dt : 0),
+    ));
+    for (const id of ["feedbackBall", "previewBall"]) {
+      document.getElementById(id).style.left = `${x * 100}%`;
+    }
+  }
+  requestAnimationFrame(drawFeedbackFrame);
+}
+requestAnimationFrame(drawFeedbackFrame);
 
 updateTrialSummary();
 updateHapticIntensity();

@@ -24,7 +24,7 @@ from config import (
 from load_session import load_session
 
 
-async def wait_until(predicate, *, timeout: float = 4.0) -> None:
+async def wait_until(predicate, *, timeout: float = 10.0) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while not predicate():
@@ -39,7 +39,8 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output_dir = Path(temporary) / "break_session"
-            service = ApplicationService(demo=True, time_scale=0.02)
+            # Windows 默认定时粒度约 15.6 ms，避免把整段实验压缩至该量级。
+            service = ApplicationService(demo=True, time_scale=0.1)
             await service.start()
             try:
                 await service.configure_session(
@@ -146,7 +147,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
     async def test_demo_pipeline_creates_complete_readable_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output_dir = Path(temporary) / "complete_session"
-            service = ApplicationService(demo=True, time_scale=0.01)
+            service = ApplicationService(demo=True, time_scale=0.1)
             await service.start()
             try:
                 await service.configure_session(

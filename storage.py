@@ -45,6 +45,14 @@ HAPTIC_COMMAND_DTYPE = np.dtype([
     ("error", h5py.string_dtype(encoding="utf-8")),
 ])
 
+FEEDBACK_DTYPE = np.dtype([
+    ("trial_id", "<i4"), ("window_start_sample", "<i8"), ("window_end_sample", "<i8"),
+    ("prediction_class_id", "i1"), ("p_right", "<f8"), ("signal", "<f8"),
+    ("smooth", "<f8"), ("control", "<f8"), ("velocity", "<f8"), ("cursor_x", "<f8"),
+    ("inference_ms", "<f8"), ("wall_time_s", "<f8"), ("actual_time_s", "<f8"),
+    ("control_elapsed_s", "<f8"),
+])
+
 EVENT_DTYPE = np.dtype(
     [
         ("event_id", "<i4"),
@@ -115,6 +123,7 @@ class SessionWriter:
         malformed_packets_at_start: int = 0,
         demo: bool = False,
         time_scale: float = 1.0,
+        feedback_metadata: dict | None = None,
     ) -> None:
         ensure_empty_output_dir(config.output_dir)
         self.config = config
@@ -130,6 +139,8 @@ class SessionWriter:
         self._filtered_pending: list[np.ndarray] = []
         self._pending_sample_count = 0
         self._runtime = {"demo": demo, "time_scale": time_scale}
+        self._feedback_metadata = feedback_metadata
+        self._feedback_dataset = None
 
         self._file = h5py.File(self.path, "x")
         self._create_schema()
@@ -231,6 +242,17 @@ class SessionWriter:
             "commands", shape=(0,), maxshape=(None,), chunks=(128,),
             dtype=HAPTIC_COMMAND_DTYPE,
         )
+        if self.config.self_learning_enabled:
+            group = root.create_group("self_learning")
+            group.create_dataset(
+                "config_json", data=json.dumps(self._feedback_metadata, ensure_ascii=False),
+                dtype=h5py.string_dtype(encoding="utf-8"),
+            )
+            group.attrs["labels"] = "trial class_id=-1 unknown; predictions are not ground truth"
+            group.attrs["window"] = "750 raw samples within current trial imagery; end exclusive"
+            self._feedback_dataset = group.create_dataset(
+                "feedback", shape=(0,), maxshape=(None,), chunks=(256,), dtype=FEEDBACK_DTYPE,
+            )
 
         self._trial_rows = np.empty(len(self.plans), dtype=TRIAL_DTYPE)
         for index, plan in enumerate(self.plans):
@@ -422,6 +444,17 @@ class SessionWriter:
         ), dtype=HAPTIC_COMMAND_DTYPE)
         # 不逐条 flush；跟随 EEG 块、协议事件或最终关闭一起落盘。
 
+    def append_feedback(self, row: dict, *, wall_time_s: float, actual_time_s: float) -> None:
+        self._require_open()
+        if self._feedback_dataset is None:
+            raise ValueError("当前会话未启用自主学习")
+        values = {**row, "wall_time_s": wall_time_s, "actual_time_s": actual_time_s}
+        index = len(self._feedback_dataset)
+        self._feedback_dataset.resize((index + 1,))
+        self._feedback_dataset[index] = np.array(
+            tuple(values[name] for name in FEEDBACK_DTYPE.names), dtype=FEEDBACK_DTYPE,
+        )
+
     def finalize(
         self,
         *,
@@ -466,6 +499,7 @@ class SessionWriter:
             "scheduled_breaks": self.config.scheduled_break_count,
             "termination_reason": reason,
             "haptic_command_count": len(self._haptic_dataset),
+            "feedback_prediction_count": len(self._feedback_dataset) if self._feedback_dataset is not None else 0,
             "haptic_failed_command_count": int(
                 np.count_nonzero(~self._haptic_dataset[:]["success"])
             ),
@@ -519,6 +553,9 @@ def write_session_readme(
     quality: dict[str, Any] | None = None,
     termination_reason: str = "",
 ) -> Path:
+    if config.self_learning_enabled:
+        from self_learning.documentation import write_readme
+        return write_readme(config, status=status, quality=quality, reason=termination_reason)
     template_path = Path(__file__).resolve().parent / "templates" / "session_readme.md"
     template = template_path.read_text(encoding="utf-8")
     sequence = " ".join(

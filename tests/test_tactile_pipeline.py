@@ -20,7 +20,7 @@ from haptics import HapticController
 from load_session import load_session
 
 
-async def wait_until(predicate, timeout=4.0):
+async def wait_until(predicate, timeout=12.0):
     deadline = asyncio.get_running_loop().time() + timeout
     while not predicate():
         if asyncio.get_running_loop().time() >= deadline:
@@ -241,7 +241,8 @@ class TactileAcquisitionTest(unittest.IsolatedAsyncioTestCase):
     async def test_two_sides_cue_to_end_and_break_test_does_not_cross_trial(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "tactile"
-            service = ApplicationService(demo=True, time_scale=0.05)
+            # 将 0.25 s 触觉步长保留为 62.5 ms，超过 Windows 默认定时粒度。
+            service = ApplicationService(demo=True, time_scale=0.25)
             trace = []
             original = service._on_haptic_command
 

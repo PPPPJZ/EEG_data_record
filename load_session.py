@@ -46,6 +46,14 @@ def load_session(path: str | Path) -> dict[str, Any]:
                 handle["haptics/commands"][:] if "haptics/commands" in handle
                 else np.empty(0, dtype=[])
             ),
+            "feedback": (
+                handle["self_learning/feedback"][:] if "self_learning/feedback" in handle
+                else np.empty(0, dtype=[])
+            ),
+            "feedback_config": (
+                _read_json_dataset(handle["self_learning/config_json"])
+                if "self_learning/config_json" in handle else None
+            ),
             "quality": {
                 key: _python_scalar(value)
                 for key, value in handle["quality"].attrs.items()

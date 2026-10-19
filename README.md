@@ -1,12 +1,13 @@
-# 运动想象 EEG 数据采集：pure_MI / tactile_MI
+# 运动想象 EEG 数据采集：pure_MI / tactile_MI / self_learning
 
 Python 直接通过 BLE 连接 `Motren_E`，浏览器用于实验设置、8 通道实时波形
-检查和左右手运动想象提示。支持两种采集模式：
+检查、运动想象提示和 teacher 光标反馈。支持三种采集模式：
 
 | 模式 | 刺激 |
 |---|---|
 | `pure_MI` | 纯运动想象，沿用原有流程 |
 | `tactile_MI` | 在运动想象期间给同侧手腕施加高低交替震动 |
+| `self_learning` | 受试者自主选侧，用固定 ADFCNN teacher 控制蓝色小球 |
 
 本目录是可独立运行的发布目录，不依赖 `EEG_data_test` 或其他项目目录。
 
@@ -85,13 +86,27 @@ bluetoothctl power on
 或马达的连接程序。`tactile_MI` 需要适配器支持同时连接 **3 个 BLE 外设**，
 具体能力取决于适配器与驱动。扫描过程串行协调，连接建立后会保持连接。
 
-本次验证在 macOS 的 `EEG_hardware` 中完成，包含模拟采集与替代 BLE 客户端
-验证；尚未在 Windows/Linux 或三台真实外设上完成实机验证。Python 依赖不能
+原数采验证在 macOS 的 `EEG_hardware` 中完成，包含模拟采集与替代 BLE 客户端；
+self_learning 已在 Windows 11、真实 Motren_E 和 NVIDIA GPU 上完成采集及推理验证。
+三台真实外设的触觉同步仍需实机验证。Python 依赖不能
 代替操作系统蓝牙服务、权限或设备驱动。
 
-## 操作流程
+## self_learning
 
-1. 首页先选择 `pure_MI` 或 `tactile_MI`。
+选择自主学习后，设置总 trial 数（默认 100）和 teacher 模型绝对路径，
+不填写左右手 trial 数，也不连接马达。设备检查页右上显示模型加载及预热状态，
+“模型测试”对 10 条随机原始窗口逐条推理并报告耗时。
+每个 trial 的 0–3 秒自行决定想象方向，3–10 秒显示蓝色小球；想象窗口收齐
+750 点后（通常第 6 秒）开始 40 ms 滑窗反馈。每次 trial 重置缓冲和光标。
+
+本阶段标签为未知 `-1`，模型反馈单独保存，不代表受试者真实选择。
+模型只用原始 EEG 窗口的 40 Hz FIR 和标准化，与波形显示滤波独立。
+控制配置在 `self_learning/control.yaml`，详细使用方法见
+[自主学习模块说明](self_learning/README.md)。
+
+## pure_MI / tactile_MI 操作流程
+
+1. 首页先选择 `pure_MI`、`tactile_MI` 或 `self_learning`。
 2. 填写受试者编号、日期、描述、左右手 trial 数、每 N 个 trial 的休息间隔
    和数据目录。左右手默认各 50 个，N 默认 20；每次按指定数量随机排列。
 3. `tactile_MI` 额外显示震动强度滑条：范围 0–1，步长 0.01，默认 **0.8**。
@@ -162,8 +177,8 @@ trial 或准备期间 EEG/马达断连会终止实验，停止另一侧马达并
 
 ## 数据输出与读取
 
-每次实验输出一个 `motor_imagery.h5` 和一个中文 `README.md`。两种模式的
-EEG、事件及 trial 索引结构保持一致，schema 版本为 **1.2**：
+每次实验输出一个 `motor_imagery.h5` 和一个中文 `README.md`。三种模式的
+EEG、事件及 trial 索引结构保持兼容，schema 版本为 **1.3**：
 
 | 路径 | 内容 |
 |---|---|
@@ -174,6 +189,8 @@ EEG、事件及 trial 索引结构保持一致，schema 版本为 **1.2**：
 | `/events/table` | 协议事件时间和对应 EEG 样本索引 |
 | `/trials/table` | 随机序列、block_id、cue 等实际采样边界 |
 | `/haptics/commands` | 震动命令侧别、百分比、trial_id、请求/返回时间、样本索引及成败 |
+| `/self_learning/feedback` | 仅自主学习：窗口边界、模型概率、控制与位置及耗时 |
+| `/self_learning/config_json` | 仅自主学习：teacher 哈希、预处理、控制配置及测速结果 |
 | `/quality` | 样本覆盖率、时间误差、异常数据包及震动命令失败数 |
 
 准备和设备检查 EEG 不保存。组间休息继续接收、滤波和显示 EEG，但不写入
@@ -243,6 +260,7 @@ haptics.py                双马达连接、测试、定时刺激和停止
 storage.py                HDF5 写入及实验 README
 load_session.py           读取、trial 切片及可选 CSV 导出
 adfcnn/                   ADFCNN 训练、teacher 模型保存和 Feedback 推理
+self_learning/            自主学习原始窗口推理、光标控制与 control.yaml
 static/                   无构建依赖的网页界面
 templates/                每次实验的中文说明模板
 BLE/haptic_control.py     单马达手动调试工具

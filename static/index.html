@@ -27,6 +27,11 @@
           <span>触觉辅助运动想象</span>
           <p>运动想象期间，同侧手腕接受高低交替震动。</p>
         </button>
+        <button id="selfLearningModeButton" class="mode-card" type="button">
+          <strong>self_learning</strong>
+          <span>自主运动想象学习</span>
+          <p>自主决定想象方向，通过 Teacher 的蓝色小球获得实时反馈。</p>
+        </button>
       </div>
     </section>
 
@@ -59,16 +64,26 @@
             <input id="experimentDate" name="experiment_date" type="date" required>
           </label>
 
-          <label class="field">
+          <label id="leftTrialsField" class="field">
             <span>左手 trial 数</span>
             <input id="leftTrials" name="left_trials" type="number"
                    min="0" max="10000" step="1" value="50" required>
           </label>
 
-          <label class="field">
+          <label id="rightTrialsField" class="field">
             <span>右手 trial 数</span>
             <input id="rightTrials" name="right_trials" type="number"
                    min="0" max="10000" step="1" value="50" required>
+          </label>
+
+          <label id="learningTrialsField" class="field" hidden>
+            <span>学习 trial 总数</span>
+            <input id="learningTrials" type="number" min="1" max="10000" step="1" value="100" disabled>
+          </label>
+          <label id="teacherPathField" class="field field-wide" hidden>
+            <span>Teacher 模型文件（绝对路径）</span>
+            <input id="teacherModelPath" type="text" autocomplete="off"
+                   placeholder="例如 C:\EEG_data\tactile_MI\adfcnn_teacher.pt" disabled>
           </label>
 
           <label class="field">
@@ -116,6 +131,10 @@
           <h1 id="deviceTitle">设备与信号检查</h1>
         </div>
         <div class="device-actions">
+          <div id="modelStatus" class="device-status" data-connected="false" hidden>
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="modelStatusText">Teacher · 等待加载</span>
+          </div>
           <div id="deviceStatus" class="device-status" data-connected="false">
             <span class="status-dot" aria-hidden="true"></span>
             <span id="deviceStatusText">正在启动采集服务</span>
@@ -166,6 +185,22 @@
         </button>
       </div>
 
+      <div id="modelPanel" class="haptic-panel" hidden>
+        <div class="haptic-statuses">
+          <small id="modelMessage" aria-live="polite">模型测试：10 条随机原始窗口，逐条推理。</small>
+        </div>
+        <button id="modelTestButton" class="secondary-button" type="button" disabled>模型测试</button>
+      </div>
+      <div id="feedbackPreview" hidden>
+        <div class="preview-toolbar">
+          <span>光标预览 · 前 3 秒保持居中 · 不保存数据</span>
+          <button id="previewStartButton" class="secondary-button" type="button">启动</button>
+          <button id="previewStopButton" class="secondary-button" type="button">停止</button>
+          <button id="previewResetButton" class="secondary-button" type="button">重置</button>
+        </div>
+        <div class="preview-track"><span id="previewBall" class="feedback-ball"></span></div>
+      </div>
+
       <section class="waveform-area" aria-label="Eight channel EEG waveforms">
         <canvas id="waveformCanvas"></canvas>
       </section>
@@ -191,7 +226,13 @@
 
       <div id="restContent" class="experiment-center rest-content" hidden>
         <h1>休息</h1>
+        <p id="selfLearningRestPrompt" hidden>请先决定接下来要想象哪一侧的手部运动。</p>
         <p id="remainingTrials">剩余 -- 个 trial</p>
+      </div>
+
+      <div id="selfLearningContent" class="feedback-area" hidden>
+        <p id="learningCounter" class="learning-counter"></p>
+        <span id="feedbackBall" class="feedback-ball" role="img" aria-label="脑控蓝色小球"></span>
       </div>
 
       <div id="cueContent" class="experiment-center cue-content" hidden>

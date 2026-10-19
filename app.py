@@ -51,6 +51,10 @@ from config import (
     TASK_SECONDS,
     DEFAULT_HAPTIC_INTENSITY,
     MODE_PURE_MI,
+    DEFAULT_LEARNING_TRIALS,
+    SELF_LEARNING_REST_SECONDS,
+    SELF_LEARNING_TASK_SECONDS,
+    EVENT_SELF_LEARNING_START,
 )
 from eeg import BLEEEGSource, SimulatedEEGSource
 from haptics import HapticCommand, HapticController
@@ -69,13 +73,15 @@ from storage import (
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
-TRIAL_STAGES = {"preparing", "rest", "cue", "imagery"}
+TRIAL_STAGES = {"preparing", "rest", "cue", "imagery", "self_learning"}
 BREAK_STAGES = {"break_instruction", "break_monitor"}
 ACTIVE_STAGES = TRIAL_STAGES | BREAK_STAGES
 
 
 class SessionForm(BaseModel):
-    experiment_mode: Literal["pure_MI", "tactile_MI"] = MODE_PURE_MI
+    experiment_mode: Literal["pure_MI", "tactile_MI", "self_learning"] = MODE_PURE_MI
+    learning_trials: int = Field(default=DEFAULT_LEARNING_TRIALS, ge=1, le=10_000)
+    teacher_model_path: str = ""
     haptic_intensity: float = Field(
         default=DEFAULT_HAPTIC_INTENSITY, ge=0.0, le=1.0, allow_inf_nan=False
     )
@@ -93,13 +99,22 @@ class SessionForm(BaseModel):
 
 
 class ApplicationService:
-    def __init__(self, *, demo: bool = False, time_scale: float = 1.0):
+    def __init__(
+        self, *, demo: bool = False, time_scale: float = 1.0,
+        mock_teacher: bool = False, teacher_device: str = "cuda:0",
+    ):
         if not math.isfinite(time_scale) or time_scale <= 0:
             raise ValueError("time_scale must be positive and finite")
         if not demo and time_scale != 1.0:
             raise ValueError("真实采集必须使用 time_scale=1")
         self.demo = demo
         self.time_scale = time_scale
+        if mock_teacher and not demo:
+            raise ValueError("模拟 teacher 只能在 --demo 中启用")
+        self.mock_teacher = mock_teacher
+        self.teacher_device = teacher_device
+        self.feedback = None
+        self._model_test_task = None
 
         self.stage = "information"
         self.config: SessionConfig | None = None
@@ -154,6 +169,7 @@ class ApplicationService:
         if self.stage in ACTIVE_STAGES:
             await self.abort_experiment("服务器停止")
         await self._stop_haptics()
+        await self._stop_feedback()
         await self._stop_source()
         for task in self._background_tasks:
             task.cancel()
@@ -212,6 +228,72 @@ class ApplicationService:
         if self.haptics is not None:
             await self.haptics.stop()
             self.haptics = None
+
+    async def _stop_feedback(self) -> None:
+        if self._model_test_task:
+            await self._model_test_task
+            self._model_test_task = None
+        if self.feedback:
+            await self.feedback.close()
+            self.feedback = None
+
+    def _feedback_ready(self) -> bool:
+        return (
+            self.config is None or not self.config.self_learning_enabled
+            or (self.feedback is not None and self.feedback.ready)
+        )
+
+    def _on_feedback_fault(self, reason: str) -> None:
+        if self.feedback:
+            self.feedback.disable()
+        if self.stage in ACTIVE_STAGES and not self._abort_scheduled:
+            self._abort_scheduled = True
+            self._recording_active = False
+            asyncio.create_task(self.abort_experiment(reason), name="abort-feedback-fault")
+
+    def _on_feedback_prediction(self, row: dict) -> None:
+        if self.stage != "self_learning" or not self._recording_active or self.writer is None:
+            return
+        self.writer.append_feedback(
+            row, wall_time_s=self._wall_elapsed(), actual_time_s=self._active_elapsed(),
+        )
+
+    async def test_model(self) -> None:
+        async with self._session_lock:
+            if self.stage not in {"device_check", "break_monitor"} or self.feedback is None:
+                raise ValueError("只能在自主学习的设备检查或组间休息测试模型")
+            if not self.feedback.ready or self.feedback.busy or self.feedback.enabled:
+                raise ValueError("请等待模型就绪，并先停止光标预览")
+            if self._model_test_task and not self._model_test_task.done():
+                raise ValueError("模型测试正在运行")
+
+            async def run():
+                try:
+                    await self.feedback.test()
+                except ValueError:
+                    pass  # 状态广播显示模型的错误信息。
+
+            self._model_test_task = asyncio.create_task(run(), name="teacher-speed-test")
+            # 让 busy 标志在本次请求返回前置位，防止与开始采集竞争。
+            await asyncio.sleep(0)
+
+    async def preview_feedback(self, action: str) -> None:
+        async with self._session_lock:
+            if self.stage != "device_check" or self.feedback is None:
+                raise ValueError("光标预览仅在自主学习设备检查阶段使用")
+            if action == "stop":
+                self.feedback.disable()
+            elif action == "reset":
+                if self.feedback.enabled:
+                    self.feedback.begin(context="preview")
+                else:
+                    self.feedback.cursor.reset()
+                    self.feedback.ring.reset()
+                    self.feedback.last_prediction = None
+            elif action == "start":
+                if not self.device_connected or not self._has_valid_signal:
+                    raise ValueError("EEG 信号尚未就绪")
+                self.feedback.begin(context="preview")
 
     def _haptics_ready(self) -> bool:
         return (
@@ -273,6 +355,8 @@ class ApplicationService:
         self.device_connected = connected
         if not connected:
             self._has_valid_signal = False
+            if self.feedback is not None:
+                self.feedback.disable()
 
         if connection_lost and self.stage in BREAK_STAGES:
             self._break_paused = True
@@ -320,6 +404,14 @@ class ApplicationService:
                         name="abort-on-storage-error",
                     )
 
+        if self.feedback is not None and self.feedback.enabled:
+            try:
+                self.feedback.append(
+                    raw_uv, self.writer.sample_count if self.writer else self.feedback.ring.total + raw_uv.shape[1]
+                )
+            except ValueError as exc:
+                self._on_feedback_fault(str(exc))
+
         if self.sample_queue.full():
             with suppress(asyncio.QueueEmpty):
                 self.sample_queue.get_nowait()
@@ -335,14 +427,16 @@ class ApplicationService:
                 if hasattr(form, "model_dump")
                 else form.dict()
             )
-            config = create_session_config(**form_values)
+            config = create_session_config(**form_values, mock_teacher=self.mock_teacher)
             ensure_empty_output_dir(config.output_dir)
             await self._stop_haptics()
+            await self._stop_feedback()
             self.config = config
             self.sequence = build_trial_sequence(config)
             self.plans = build_trial_plans(
                 self.sequence,
                 config.break_every_trials,
+                experiment_mode=config.experiment_mode,
             )
             self.session_locked = False
             self.last_outcome = ""
@@ -350,6 +444,17 @@ class ApplicationService:
             self.result_summary = None
             self.stage = "device_check"
             self.device_status = "正在启动采集服务"
+            if config.self_learning_enabled:
+                # 重新配置时也避免已有 BLE/WinRT 任务先于 torch DLL 初始化。
+                await self._stop_source()
+                from self_learning.runtime import FeedbackRuntime
+                self.feedback = FeedbackRuntime(
+                    config.teacher_model_path, device=self.teacher_device,
+                    mock=self.mock_teacher, time_scale=self.time_scale,
+                    on_prediction=self._on_feedback_prediction,
+                    on_fault=self._on_feedback_fault,
+                )
+                await self.feedback.start()
             await self._start_source()
             await self._start_haptics()
         await self.broadcast({"type": "state", **self.state_payload()})
@@ -364,6 +469,7 @@ class ApplicationService:
             if self.stage in ACTIVE_STAGES:
                 raise ValueError("请先终止当前实验")
             await self._stop_haptics()
+            await self._stop_feedback()
             await self._stop_source()
             self.config = None
             self.sequence = []
@@ -391,6 +497,12 @@ class ApplicationService:
                 raise ValueError("两侧马达尚未全部连接")
             if self.haptics is not None and self.haptics.busy:
                 raise ValueError("请等待震动测试结束后开始采集")
+            if not self._feedback_ready():
+                raise ValueError("Teacher 尚未加载并预热完成")
+            if self.feedback is not None:
+                if self.feedback.busy:
+                    raise ValueError("请等待模型测试结束")
+                self.feedback.disable()
 
             ensure_empty_output_dir(self.config.output_dir)
             try:
@@ -400,6 +512,7 @@ class ApplicationService:
                     malformed_packets_at_start=self._malformed_packets(),
                     demo=self.demo,
                     time_scale=self.time_scale,
+                    feedback_metadata=self.feedback.state_payload() if self.feedback else None,
                 )
                 write_session_readme(
                     self.config,
@@ -581,7 +694,8 @@ class ApplicationService:
             )
             now = loop.time()
             if not self._break_paused and not (
-                self.haptics is not None and self.haptics.busy
+                (self.haptics is not None and self.haptics.busy)
+                or (self.feedback is not None and self.feedback.busy)
             ):
                 elapsed = (now - last_update) / self.time_scale
                 previous_remaining = self._break_remaining_s
@@ -657,7 +771,11 @@ class ApplicationService:
                     + plan.planned_rest_start_s * self.time_scale
                 )
                 await self._sleep_until(trial_start_deadline)
-                self._set_phase("rest", REST_SECONDS)
+                if self.feedback:
+                    self.feedback.disable()
+                self._set_phase(
+                    "rest", SELF_LEARNING_REST_SECONDS if self.config.self_learning_enabled else REST_SECONDS
+                )
                 self._record_event(
                     event_code=EVENT_TRIAL_START,
                     trial_id=plan.trial_id,
@@ -672,6 +790,32 @@ class ApplicationService:
                     + plan.planned_cue_start_s * self.time_scale
                 )
                 await self._sleep_until(cue_deadline)
+                if self.config.self_learning_enabled:
+                    self._task_started_wall = loop.time()
+                    self._set_phase("self_learning", SELF_LEARNING_TASK_SECONDS)
+                    self._record_event(
+                        event_code=EVENT_SELF_LEARNING_START, trial_id=plan.trial_id,
+                        class_id=CLASS_NONE, planned_time_s=plan.planned_cue_start_s,
+                        boundary="cue_start",
+                    )
+                    # 无 cue，兼容原 trial 索引：cue_end 与控制开始同一采样点。
+                    self.writer.mark_trial_boundary(
+                        trial_id=plan.trial_id, boundary="cue_end",
+                        actual_time_s=self._active_elapsed(), sample_index=self.writer.sample_count,
+                    )
+                    self.feedback.begin(trial_id=plan.trial_id, context="trial")
+                    await self._sleep_until(
+                        self._schedule_origin_wall + plan.planned_trial_end_s * self.time_scale
+                    )
+                    self.feedback.disable()
+                    self._record_event(
+                        event_code=EVENT_TRIAL_END, trial_id=plan.trial_id,
+                        class_id=CLASS_NONE, planned_time_s=plan.planned_trial_end_s,
+                        boundary="trial_end",
+                    )
+                    if (index + 1) % self.config.break_every_trials == 0 and index + 1 < len(self.plans):
+                        self._recording_active = False
+                    continue
                 self._set_phase("cue", CUE_SECONDS)
                 self._task_started_wall = loop.time()
                 trial_end_deadline = (
@@ -792,6 +936,8 @@ class ApplicationService:
 
             was_recording = self._recording_t0_wall is not None
             self._recording_active = False
+            if self.feedback:
+                self.feedback.disable()
             if self.haptics is not None:
                 await self.haptics.stop_stimulation()
             if was_recording:
@@ -879,7 +1025,8 @@ class ApplicationService:
         elapsed_protocol = (
             asyncio.get_running_loop().time() - self._task_started_wall
         ) / self.time_scale
-        return min(1.0, max(0.0, elapsed_protocol / TASK_SECONDS))
+        duration = SELF_LEARNING_TASK_SECONDS if self.config and self.config.self_learning_enabled else TASK_SECONDS
+        return min(1.0, max(0.0, elapsed_protocol / duration))
 
     def state_payload(self) -> dict:
         config = self.config
@@ -896,6 +1043,8 @@ class ApplicationService:
                 and self.device_connected
                 and self._has_valid_signal
                 and self._haptics_ready()
+                and self._feedback_ready()
+                and not (self.feedback is not None and self.feedback.busy)
                 and not (self.haptics is not None and self.haptics.busy)
                 and not self.session_locked
             ),
@@ -908,6 +1057,12 @@ class ApplicationService:
             "experiment_mode": config.experiment_mode if config else None,
             "haptic_intensity": config.haptic_intensity if config else DEFAULT_HAPTIC_INTENSITY,
             "haptics": self.haptics.state_payload() if self.haptics else None,
+            "feedback": self.feedback.state_payload() if self.feedback else None,
+            "can_test_model": (
+                self.stage in {"device_check", "break_monitor"} and self.feedback is not None
+                and self.feedback.ready and not self.feedback.busy and not self.feedback.enabled
+                and not self._abort_scheduled
+            ),
             "can_test_haptics": (
                 self.stage in {"device_check", "break_monitor"}
                 and self.haptics is not None
@@ -932,7 +1087,7 @@ class ApplicationService:
             ),
             "cue_direction": (
                 self.plans[self._trial_index].class_name
-                if 0 <= self._trial_index < len(self.plans)
+                if config and not config.self_learning_enabled and 0 <= self._trial_index < len(self.plans)
                 else ""
             ),
             "progress": 0.0,
@@ -975,7 +1130,7 @@ class ApplicationService:
             )
         elif self.stage == "rest":
             payload["progress"] = self._phase_progress()
-        elif self.stage in {"cue", "imagery"}:
+        elif self.stage in {"cue", "imagery", "self_learning"}:
             payload["progress"] = self._task_progress()
         return payload
 
@@ -1025,8 +1180,13 @@ class ApplicationService:
             await asyncio.sleep(interval)
 
 
-def create_app(*, demo: bool = False, time_scale: float = 1.0) -> FastAPI:
-    service = ApplicationService(demo=demo, time_scale=time_scale)
+def create_app(
+    *, demo: bool = False, time_scale: float = 1.0, mock_teacher: bool = False,
+    teacher_device: str = "cuda:0",
+) -> FastAPI:
+    service = ApplicationService(
+        demo=demo, time_scale=time_scale, mock_teacher=mock_teacher, teacher_device=teacher_device,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -1113,6 +1273,22 @@ def create_app(*, demo: bool = False, time_scale: float = 1.0) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True}
 
+    @web_app.post("/api/self-learning/test")
+    async def test_model():
+        try:
+            await service.test_model()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True}
+
+    @web_app.post("/api/self-learning/preview/{action}")
+    async def preview_feedback(action: Literal["start", "stop", "reset"]):
+        try:
+            await service.preview_feedback(action)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True}
+
     @web_app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
         await websocket.accept()
@@ -1140,6 +1316,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--teacher-device", default="cuda:0", help="Teacher: cuda:0 / cpu")
+    parser.add_argument("--mock-teacher", action="store_true", help="仅 --demo：模拟左右概率")
     parser.add_argument(
         "--demo",
         action="store_true",
@@ -1154,10 +1332,15 @@ def main() -> None:
     args = parser.parse_args()
     if not args.demo and args.time_scale != 1.0:
         parser.error("--time-scale 只能与 --demo 一起使用")
+    if args.mock_teacher and not args.demo:
+        parser.error("--mock-teacher 只能与 --demo 一起使用")
 
     logging.getLogger("bleak").setLevel(logging.WARNING)
     uvicorn.run(
-        create_app(demo=args.demo, time_scale=args.time_scale),
+        create_app(
+            demo=args.demo, time_scale=args.time_scale,
+            mock_teacher=args.mock_teacher, teacher_device=args.teacher_device,
+        ),
         host=args.host,
         port=args.port,
         log_level="info",
