@@ -49,11 +49,13 @@ from config import (
     SAMPLE_BROADCAST_HZ,
     STATE_BROADCAST_HZ,
     TASK_SECONDS,
+    TRIAL_SECONDS,
     DEFAULT_HAPTIC_INTENSITY,
     MODE_PURE_MI,
     DEFAULT_LEARNING_TRIALS,
     SELF_LEARNING_REST_SECONDS,
     SELF_LEARNING_TASK_SECONDS,
+    SELF_LEARNING_TRIAL_SECONDS,
     EVENT_SELF_LEARNING_START,
 )
 from eeg import BLEEEGSource, SimulatedEEGSource
@@ -1051,6 +1053,13 @@ class ApplicationService:
             "last_outcome": self.last_outcome,
             "last_message": self.last_message,
             "demo": self.demo,
+            "protocol_timing": {
+                "standard_trial_seconds": TRIAL_SECONDS,
+                "self_learning_trial_seconds": SELF_LEARNING_TRIAL_SECONDS,
+                "interblock_break_seconds": (
+                    BREAK_INSTRUCTION_SECONDS + BREAK_COUNTDOWN_SECONDS
+                ),
+            },
             "result_summary": self.result_summary,
             "output_dir": str(config.output_dir) if config else "",
             "subject_id": config.subject_id if config else "",

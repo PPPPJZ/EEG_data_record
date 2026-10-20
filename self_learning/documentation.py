@@ -12,9 +12,12 @@ def write_readme(config, *, status, quality=None, reason=""):
 学习 trial：{config.total_trials}；每 {config.break_every_trials} 个 trial 组间休息。
 Teacher：{config.teacher_model_path}。
 
-开始采集后先准备 5 秒，此时不保存 EEG。每个 trial 共 10 秒：
+开始采集后先准备 5 秒，此时不保存 EEG。每个 trial 共
+{SELF_LEARNING_REST_SECONDS + SELF_LEARNING_TASK_SECONDS:g} 秒：
 0–{SELF_LEARNING_REST_SECONDS:g} 秒休息并自主决定想象哪一侧；
-随后 {SELF_LEARNING_TASK_SECONDS:g} 秒运动想象，显示蓝色小球，不显示左右指令。
+{SELF_LEARNING_REST_SECONDS:g}–
+{SELF_LEARNING_REST_SECONDS + SELF_LEARNING_TASK_SECONDS:g} 秒运动想象，
+显示蓝色小球，不显示左右指令。
 每次控制开始时重置小球、EMA 和原始缓冲；收齐本次想象 750 点后开始推理，
 即通常在 trial 第 6 秒出现首次反馈，之后每 40 ms 尝试推理最近的完整窗口。
 实际间隔及控制参数以 H5 self_learning/config_json 为准。

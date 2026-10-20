@@ -10,7 +10,15 @@ from pathlib import Path
 import numpy as np
 
 from app import ApplicationService, SessionForm
-from config import EVENT_CUE_LEFT, EVENT_CUE_RIGHT, EVENT_SELF_LEARNING_START
+from config import (
+    BREAK_COUNTDOWN_SECONDS,
+    BREAK_INSTRUCTION_SECONDS,
+    EVENT_CUE_LEFT,
+    EVENT_CUE_RIGHT,
+    EVENT_SELF_LEARNING_START,
+    SELF_LEARNING_TRIAL_SECONDS,
+    TRIAL_SECONDS,
+)
 from load_session import load_session
 from self_learning.control import ControlConfig, CursorController, RawRingBuffer
 from self_learning.runtime import FeedbackRuntime
@@ -188,6 +196,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     output_dir=str(output),
                 ))
                 await wait_until(lambda: service.state_payload()["can_start"])
+                timing = service.state_payload()["protocol_timing"]
+                self.assertEqual(timing["standard_trial_seconds"], TRIAL_SECONDS)
+                self.assertEqual(
+                    timing["self_learning_trial_seconds"],
+                    SELF_LEARNING_TRIAL_SECONDS,
+                )
+                self.assertEqual(
+                    timing["interblock_break_seconds"],
+                    BREAK_INSTRUCTION_SECONDS + BREAK_COUNTDOWN_SECONDS,
+                )
                 self.assertIsNone(service.haptics)
                 self.assertEqual(service.sequence, [-1, -1])
                 await service.test_model()
@@ -212,7 +230,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             session = load_session(output / "motor_imagery.h5")
             self.assertEqual(session["status"], "complete")
             self.assertEqual(session["trials"]["class_id"].tolist(), [-1, -1])
-            self.assertEqual(session["protocol"]["trial_seconds"], 10)
+            self.assertEqual(
+                session["protocol"]["trial_seconds"],
+                SELF_LEARNING_TRIAL_SECONDS,
+            )
             self.assertEqual(session["raw_uv"].shape, session["filtered_uv"].shape)
             codes = session["events"]["event_code"].tolist()
             self.assertEqual(codes.count(EVENT_SELF_LEARNING_START), 2)

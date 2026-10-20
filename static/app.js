@@ -5,8 +5,6 @@ const SAMPLE_RATE = 250;
 const PREVIEW_SECONDS = 5;
 const PREVIEW_POINTS = SAMPLE_RATE * PREVIEW_SECONDS;
 const DISPLAY_LIMIT = 50;
-const TRIAL_SECONDS = 8;
-const BREAK_SECONDS = 33;
 const ACTIVE_STAGES = new Set([
   "preparing",
   "rest",
@@ -79,6 +77,7 @@ let selectedMode = null;
 let hapticRequestError = "";
 let modelRequestError = "";
 let feedbackReceivedAt = 0;
+let protocolTiming = null;
 
 function localDateString() {
   const now = new Date();
@@ -152,6 +151,11 @@ document.getElementById("changeModeButton").addEventListener("click", () => {
 hapticIntensity.addEventListener("input", updateHapticIntensity);
 
 function updateTrialSummary() {
+  if (!protocolTiming) {
+    document.getElementById("trialSummary").textContent =
+      "正在读取实验时序…";
+    return;
+  }
   const left = Number.parseInt(document.getElementById("leftTrials").value, 10);
   const right = Number.parseInt(
     document.getElementById("rightTrials").value,
@@ -170,9 +174,14 @@ function updateTrialSummary() {
   const breakCount = total > 0
     ? Math.floor((total - 1) / validBreakEvery)
     : 0;
-  const totalSeconds = total * (learning ? 10 : TRIAL_SECONDS) + breakCount * BREAK_SECONDS;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
+  const trialSeconds = learning
+    ? protocolTiming.self_learning_trial_seconds
+    : protocolTiming.standard_trial_seconds;
+  const totalSeconds =
+    total * trialSeconds + breakCount * protocolTiming.interblock_break_seconds;
+  const estimatedSeconds = Math.ceil(totalSeconds);
+  const minutes = Math.floor(estimatedSeconds / 60);
+  const seconds = estimatedSeconds % 60;
   document.getElementById("trialSummary").textContent =
     `共 ${total} 个 trial，组间休息 ${breakCount} 次，最短约 ${minutes} 分 ${String(seconds).padStart(2, "0")} 秒`;
 }
@@ -371,6 +380,19 @@ document.addEventListener("keydown", async (event) => {
 function updateState(state) {
   latestState = state;
   feedbackReceivedAt = performance.now();
+  if (state.protocol_timing) {
+    const timingChanged = !protocolTiming ||
+      protocolTiming.standard_trial_seconds !==
+        state.protocol_timing.standard_trial_seconds ||
+      protocolTiming.self_learning_trial_seconds !==
+        state.protocol_timing.self_learning_trial_seconds ||
+      protocolTiming.interblock_break_seconds !==
+        state.protocol_timing.interblock_break_seconds;
+    protocolTiming = state.protocol_timing;
+    if (timingChanged) {
+      updateTrialSummary();
+    }
+  }
   deviceStatus.dataset.connected = String(state.device_connected);
   deviceStatusText.textContent = state.device_status;
   packetStatus.textContent = `Malformed packets: ${state.malformed_packets}`;
