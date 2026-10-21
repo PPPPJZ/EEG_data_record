@@ -248,7 +248,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(np.all(feedback["window_end_sample"] - feedback["window_start_sample"] == 750))
             self.assertIn("class_id=-1", (output / "README.md").read_text(encoding="utf-8"))
 
-    async def test_disconnect_aborts_and_retains_incomplete_learning(self):
+    async def test_disconnect_removes_incomplete_learning_trial(self):
         with tempfile.TemporaryDirectory() as temporary:
             service = ApplicationService(demo=True, mock_teacher=True, time_scale=0.1)
             await service.start()
@@ -269,5 +269,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await service.stop()
             session = load_session(Path(temporary) / "motor_imagery.h5")
             self.assertEqual(session["status"], "incomplete")
-            self.assertGreater(len(session["raw_uv"]), 0)
+            self.assertEqual(len(session["raw_uv"]), 0)
+            self.assertEqual(len(session["feedback"]), 0)
+            self.assertEqual(session["trials"]["rest_start_sample"].tolist(), [-1, -1])
             self.assertEqual(session["trials"]["class_id"].tolist(), [-1, -1])

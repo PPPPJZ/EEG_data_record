@@ -26,6 +26,13 @@ const COLORS = [
 ];
 
 const modeView = document.getElementById("modeView");
+const restartView = document.getElementById("restartView");
+const restartPath = document.getElementById("restartPath");
+const restartError = document.getElementById("restartError");
+const restartSummary = document.getElementById("restartSummary");
+const continueRestartButton = document.getElementById("continueRestartButton");
+let restartSelected = false;
+let restartGeneration = 0;
 const informationView = document.getElementById("informationView");
 const deviceView = document.getElementById("deviceView");
 const experimentView = document.getElementById("experimentView");
@@ -92,6 +99,7 @@ document.getElementById("experimentDate").value = localDateString();
 function showOnly(view) {
   for (const candidate of [
     modeView,
+    restartView,
     informationView,
     deviceView,
     experimentView,
@@ -113,6 +121,7 @@ function updateHapticIntensity() {
 }
 
 function chooseMode(mode) {
+  restartSelected = false;
   selectedMode = mode;
   document.getElementById("selectedMode").textContent = mode;
   document.getElementById("hapticIntensityField").hidden = mode !== "tactile_MI";
@@ -128,6 +137,80 @@ document.getElementById("tactileModeButton")
   .addEventListener("click", () => chooseMode("tactile_MI"));
 document.getElementById("selfLearningModeButton")
   .addEventListener("click", () => chooseMode("self_learning"));
+document.getElementById("restartModeButton").addEventListener("click", () => {
+  restartSelected = true;
+  selectedMode = null;
+  showOnly(restartView);
+});
+document.getElementById("restartBackButton").addEventListener("click", () => {
+  restartSelected = false;
+  selectedMode = null;
+  showOnly(modeView);
+});
+restartPath.addEventListener("input", () => {
+  restartGeneration += 1;
+  continueRestartButton.disabled = true;
+  restartSummary.hidden = true;
+  restartError.hidden = true;
+});
+document.getElementById("restartForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const generation = ++restartGeneration;
+  const button = document.getElementById("parseRestartButton");
+  button.disabled = true;
+  button.textContent = "正在解析…";
+  continueRestartButton.disabled = true;
+  restartError.hidden = true;
+  restartSummary.hidden = true;
+  try {
+    const info = await apiRequest("/api/restart/parse", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: restartPath.value }),
+    });
+    if (generation !== restartGeneration) return;
+    restartSummary.replaceChildren();
+    const lines = [
+      `${info.experiment_mode} · 受试者 ${info.subject_id} · ${info.experiment_date}`,
+      `共 ${info.total_trials} 个 trial · 已完成 ${info.completed_trials} 个 · 剩余 ${info.remaining_trials} 个`,
+      `从第 ${info.next_trial_id} 个 trial（第 ${info.next_block_id} 组）继续`,
+      `每 ${info.break_every_trials} 个休息一次；${info.trials_before_break === 0 ? "先完成组间休息" : `先完成 ${info.trials_before_break} 个 trial`}${info.remaining_breaks > 0 && info.trials_before_break > 0 ? "后休息" : ""}`,
+      `每 trial ${info.trial_seconds} 秒（休息 ${info.rest_seconds} 秒 + 任务 ${info.task_seconds} 秒）；剩余最短约 ${Math.ceil(info.remaining_seconds / 60)} 分钟`,
+    ];
+    if (info.experiment_mode === "self_learning") lines.push(`Teacher：${info.teacher_model_path}`);
+    else lines.push(`左手剩余 ${info.remaining_left} / ${info.left_trials}；右手剩余 ${info.remaining_right} / ${info.right_trials}`);
+    if (info.experiment_mode === "tactile_MI") lines.push(`震动强度：${info.haptic_intensity}`);
+    if (info.description) lines.push(`实验描述：${info.description}`);
+    lines.push(`追加到：${info.path}`);
+    for (const text of lines) {
+      const p = document.createElement("p");
+      p.textContent = text;
+      restartSummary.append(p);
+    }
+    restartSummary.hidden = false;
+    continueRestartButton.disabled = false;
+  } catch (error) {
+    if (generation === restartGeneration) {
+      restartError.textContent = error.message;
+      restartError.hidden = false;
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = "解析文件";
+  }
+});
+continueRestartButton.addEventListener("click", async () => {
+  continueRestartButton.disabled = true;
+  restartError.hidden = true;
+  try {
+    await apiRequest("/api/restart/continue", { method: "POST" });
+    hapticRequestError = "";
+    modelRequestError = "";
+    clearPreview();
+  } catch (error) {
+    restartError.textContent = error.message;
+    restartError.hidden = false;
+  }
+});
 
 function updateModeFields() {
   const learning = selectedMode === "self_learning";
@@ -309,15 +392,20 @@ breakToggleButton.addEventListener("click", async () => {
 });
 
 async function beginNewSession(chooseAgain = true) {
+  const returnToRestart = !chooseAgain && Boolean(latestState?.restart);
   try {
     await apiRequest("/api/session/new", { method: "POST" });
     if (chooseAgain) {
       selectedMode = null;
     }
+    restartSelected = returnToRestart;
+    continueRestartButton.disabled = true;
+    restartSummary.hidden = true;
+    restartError.hidden = true;
     hapticRequestError = "";
     modelRequestError = "";
     clearPreview();
-    showOnly(selectedMode ? informationView : modeView);
+    showOnly(restartSelected ? restartView : (selectedMode ? informationView : modeView));
   } catch (error) {
     deviceMessageText.textContent = error.message;
     deviceMessage.hidden = false;
@@ -447,7 +535,7 @@ function updateState(state) {
   }
 
   if (state.stage === "information") {
-    showOnly(selectedMode ? informationView : modeView);
+    showOnly(restartSelected ? restartView : (selectedMode ? informationView : modeView));
     return;
   }
 
@@ -459,12 +547,14 @@ function updateState(state) {
     breakToggleButton.hidden = true;
     startButton.hidden = false;
     editSessionButton.hidden = false;
+    editSessionButton.textContent = state.restart ? "重新选择文件" : "修改信息";
     newSessionButton.hidden = false;
     document.getElementById("sessionSubject").textContent =
       `${state.experiment_mode} · Subject: ${state.subject_id}`;
     document.getElementById("sessionTrials").textContent =
-      `Trials: ${state.total_trials} · Break every ${state.break_every_trials}`;
-    document.getElementById("sessionPath").textContent = state.output_dir;
+      state.restart ? `已完成 ${state.completed_trials} / ${state.total_trials} · 从第 ${state.restart.next_trial_id} 个继续`
+        : `Trials: ${state.total_trials} · Break every ${state.break_every_trials}`;
+    document.getElementById("sessionPath").textContent = state.data_path || state.output_dir;
     startButton.disabled = !state.can_start;
     editSessionButton.disabled = false;
     if (state.last_message) {
@@ -499,12 +589,12 @@ function updateState(state) {
 
     if (!state.device_connected) {
       deviceMessageText.textContent =
-        "设备已断开，正在自动重连；恢复有效波形后点击“继续”重新计时30秒。";
+        `设备已断开，正在自动重连；恢复有效波形后点击“继续”重新计时 ${state.break_countdown_seconds} 秒。`;
       deviceMessage.hidden = false;
       newSessionButton.hidden = true;
     } else if (state.break_paused) {
       deviceMessageText.textContent =
-        "倒计时已暂停。确认设备与信号正常后点击“继续”，将重新计时30秒。";
+        `倒计时已暂停。确认设备与信号正常后点击“继续”，将重新计时 ${state.break_countdown_seconds} 秒。`;
       deviceMessage.hidden = false;
       newSessionButton.hidden = true;
     } else {
@@ -526,6 +616,7 @@ function updateState(state) {
 }
 
 function renderExperiment(state) {
+  breakInstructionContent.querySelector("h1").textContent = `请闭眼休息 ${state.break_countdown_seconds} s`;
   preparationContent.hidden = state.stage !== "preparing";
   restContent.hidden = state.stage !== "rest";
   cueContent.hidden = state.stage !== "cue";
@@ -558,8 +649,9 @@ function renderExperiment(state) {
 
 function renderComplete(state) {
   const summary = state.result_summary || {};
+  document.getElementById("completeMessage").textContent = state.last_message || "";
   document.getElementById("completePath").textContent =
-    `${state.output_dir}/motor_imagery.h5`;
+    state.data_path || `${state.output_dir}/motor_imagery.h5`;
   document.getElementById("recordedSamples").textContent =
     formatInteger(summary.recorded_sample_count);
   document.getElementById("dataCoverage").textContent =

@@ -32,8 +32,10 @@ class FeedbackRuntime:
         self, model_path: str, *, device: str = "cuda:0", mock: bool = False,
         time_scale: float = 1.0, on_prediction: Callable[[dict], None] | None = None,
         on_fault: Callable[[str], None] | None = None,
+        saved_config: dict | None = None, expected_sha256: str | None = None,
     ):
-        self.config = ControlConfig.load()
+        self.config = ControlConfig(**saved_config) if saved_config is not None else ControlConfig.load()
+        self.expected_sha256 = expected_sha256
         self.cursor = CursorController(self.config)
         self.ring = RawRingBuffer()
         self.model_path = model_path
@@ -90,6 +92,8 @@ class FeedbackRuntime:
             from adfcnn.adfcnn_lib.inference import Predictor
             path = Path(self.model_path)
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if self.expected_sha256 is not None and digest != self.expected_sha256:
+                raise ValueError("Teacher 文件与原实验 SHA256 不一致，请恢复原模型后重新解析")
             self.predictor = Predictor(path, device=self.device)
             if self.predictor.preprocessing.lowpass_hz != 40.0:
                 raise ValueError("本阶段要求 teacher 使用 40 Hz 窗口低通")

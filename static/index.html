@@ -32,7 +32,41 @@
           <span>自主运动想象学习</span>
           <p>自主决定想象方向，通过 Teacher 的蓝色小球获得实时反馈。</p>
         </button>
+        <button id="restartModeButton" class="mode-card" type="button">
+          <strong>restart_test</strong>
+          <span>继续中断的实验</span>
+          <p>解析原数据文件，恢复实验设置并继续剩余 trial。</p>
+        </button>
       </div>
+    </section>
+
+    <section id="restartView" class="view information-view" hidden>
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">RESTART TEST</p>
+          <h1>继续中断的实验</h1>
+        </div>
+        <button id="restartBackButton" class="secondary-button" type="button">重新选择模式</button>
+      </header>
+      <form id="restartForm" class="session-form">
+        <div class="form-introduction">
+          <h2>解析原实验</h2>
+          <p>输入 H5 文件或所在文件夹。解析后可检查进度，继续前先调试设备。</p>
+        </div>
+        <div class="form-grid">
+          <label class="field field-wide">
+            <span>实验文件或文件夹（绝对路径）</span>
+            <input id="restartPath" type="text" autocomplete="off" required
+                   placeholder="例如 C:\EEG_data\S001 或 C:\EEG_data\S001\motor_imagery.h5">
+          </label>
+        </div>
+        <div id="restartError" class="inline-message error-message" role="alert" hidden></div>
+        <div id="restartSummary" class="restart-summary" aria-live="polite" hidden></div>
+        <div class="form-actions">
+          <button id="parseRestartButton" class="secondary-button" type="submit">解析文件</button>
+          <button id="continueRestartButton" class="primary-button" type="button" disabled>继续实验</button>
+        </div>
+      </form>
     </section>
 
     <section id="informationView" class="view information-view" hidden>
@@ -263,6 +297,7 @@
       <div class="complete-content">
         <div class="completion-mark" aria-hidden="true"></div>
         <h2>采集完成</h2>
+        <p id="completeMessage"></p>
         <p id="completePath" class="complete-path"></p>
         <dl class="result-list">
           <div>

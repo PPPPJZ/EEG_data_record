@@ -52,11 +52,13 @@ class HapticController:
         demo: bool = False,
         time_scale: float = 1.0,
         scan_lock: asyncio.Lock | None = None,
+        protocol: dict | None = None,
     ) -> None:
         self.on_fault = on_fault
         self.on_command = on_command
         self.demo = demo
         self.time_scale = time_scale
+        self.protocol = protocol
         self._scan_lock = scan_lock if scan_lock is not None else asyncio.Lock()
         self._clients: dict[int, BleakClient] = {}
         self._write_locks = {side: asyncio.Lock() for side in HAPTIC_DEVICE_NAMES}
@@ -284,7 +286,9 @@ class HapticController:
             self._stimulate(
                 tuple(HAPTIC_DEVICE_NAMES), intensity,
                 beginning=beginning,
-                deadline=beginning + HAPTIC_TEST_SECONDS * self.time_scale,
+                deadline=beginning + (
+                    self.protocol["test_seconds"] if self.protocol else HAPTIC_TEST_SECONDS
+                ) * self.time_scale,
                 alternating=False, trial_id=-1,
             ),
             name="haptic-test",
@@ -311,8 +315,8 @@ class HapticController:
         deadline: float, alternating: bool, trial_id: int,
     ) -> None:
         context = "trial" if alternating else "test"
-        low = max(0.0, high - HAPTIC_INTENSITY_DIFFERENCE)
-        step = HAPTIC_STEP_SECONDS * self.time_scale
+        low = self.protocol["low_intensity"] if self.protocol else max(0.0, high - HAPTIC_INTENSITY_DIFFERENCE)
+        step = (self.protocol["step_seconds"] if self.protocol else HAPTIC_STEP_SECONDS) * self.time_scale
         loop = asyncio.get_running_loop()
         try:
             previous_slot = -1

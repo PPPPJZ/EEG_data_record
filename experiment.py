@@ -36,6 +36,7 @@ from config import (
     SELF_LEARNING_REST_SECONDS,
     SELF_LEARNING_TASK_SECONDS,
     SELF_LEARNING_TRIAL_SECONDS,
+    PREPARATION_SECONDS,
 )
 
 
@@ -53,6 +54,14 @@ class SessionConfig:
     haptic_intensity: float = DEFAULT_HAPTIC_INTENSITY
     learning_trials: int = DEFAULT_LEARNING_TRIALS
     teacher_model_path: str = ""
+    saved_protocol: dict | None = None
+
+    @property
+    def protocol(self) -> dict:
+        return self.saved_protocol if self.saved_protocol is not None else protocol_dict(
+            self.break_every_trials, experiment_mode=self.experiment_mode,
+            haptic_intensity=self.haptic_intensity,
+        )
 
     @property
     def self_learning_enabled(self) -> bool:
@@ -64,6 +73,8 @@ class SessionConfig:
 
     @property
     def haptic_low_intensity(self) -> float:
+        if self.saved_protocol is not None and self.tactile_enabled:
+            return float(self.protocol["haptic_stimulation"]["low_intensity"])
         return round(max(0.0, self.haptic_intensity - HAPTIC_INTENSITY_DIFFERENCE), 2)
 
     @property
@@ -74,9 +85,7 @@ class SessionConfig:
 
     @property
     def expected_duration_seconds(self) -> float:
-        return self.total_trials * (
-            SELF_LEARNING_TRIAL_SECONDS if self.self_learning_enabled else TRIAL_SECONDS
-        )
+        return self.total_trials * self.protocol["trial_seconds"]
 
     @property
     def scheduled_break_count(self) -> int:
@@ -84,11 +93,12 @@ class SessionConfig:
 
     @property
     def minimum_session_duration_seconds(self) -> float:
-        break_seconds = BREAK_INSTRUCTION_SECONDS + BREAK_COUNTDOWN_SECONDS
+        break_seconds = self.protocol["break_instruction_seconds"] + self.protocol["break_countdown_seconds"]
         return self.expected_duration_seconds + self.scheduled_break_count * break_seconds
 
     def as_serializable_dict(self) -> dict:
         result = asdict(self)
+        result.pop("saved_protocol", None)  # 协议只存于 protocol/json。
         result["output_dir"] = str(self.output_dir)
         result["total_trials"] = self.total_trials
         result["expected_duration_seconds"] = self.expected_duration_seconds
@@ -300,6 +310,7 @@ def protocol_dict(
         "imagery_black_seconds": 0 if learning else IMAGERY_BLACK_SECONDS,
         "motor_imagery_window_seconds": SELF_LEARNING_TASK_SECONDS if learning else TASK_SECONDS,
         "trial_seconds": SELF_LEARNING_TRIAL_SECONDS if learning else TRIAL_SECONDS,
+        "preparation_seconds": PREPARATION_SECONDS,
         "break_every_trials": break_every_trials,
         "break_instruction_seconds": BREAK_INSTRUCTION_SECONDS,
         "break_countdown_seconds": BREAK_COUNTDOWN_SECONDS,

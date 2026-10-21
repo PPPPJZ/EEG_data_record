@@ -28,27 +28,27 @@
 {haptic_protocol}
 
 设备检查阶段只显示实时滤波波形，不保存 EEG。点击“开始采集”后先进入
-5 秒准备阶段，显示“准备采集”、白色十字架和倒计时；此阶段不写入 EEG。
+{preparation_s:g} 秒准备阶段，显示“准备采集”、白色十字架和倒计时；此阶段不写入 EEG。
 
-正式记录从第一个 trial 的休息阶段开始。每个 trial 固定为 8 秒：
+正式记录从第一个 trial 的休息阶段开始。每个 trial 固定为 {trial_s:g} 秒：
 
 | trial 内时间 | 阶段 | 屏幕内容 | 是否记录 |
 |---:|---|---|---|
-| 0.0–2.5 s | 休息 | “休息”、剩余 trial 数、2.5 秒进度条 | 是 |
-| 2.5–4.0 s | cue | 左/右白色箭头、运动想象进度条 | 是 |
-| 4.0–8.0 s | 运动想象 | 黑屏，仅保留运动想象进度条 | 是 |
+| 0–{rest_s:g} s | 休息 | “休息”、剩余 trial 数、休息进度条 | 是 |
+| {rest_s:g}–{cue_end_s:g} s | cue | 左/右白色箭头、运动想象进度条 | 是 |
+| {cue_end_s:g}–{trial_s:g} s | 运动想象 | 黑屏，仅保留运动想象进度条 | 是 |
 
-运动想象窗口定义为 `[cue_start_sample:trial_end_sample]`，总长 5.5 秒。
+运动想象窗口定义为 `[cue_start_sample:trial_end_sample]`，总长 {task_s:g} 秒。
 箭头显示窗口为 `[cue_start_sample:cue_end_sample]`，后续纯黑运动想象窗口为
 `[cue_end_sample:trial_end_sample]`。所有采样切片均为 Python 风格左闭右开区间。
 
 每完成 {break_every_trials} 个 trial 且后面仍有 trial 时，进入一次组间休息：
 
-1. 黑屏显示“请闭眼休息30s”，持续 3 秒。
-2. 随后进入实时波形监控页，开始 30 秒倒计时。
-3. 剩余 6 秒时播放提示音，倒计时归零后开始下一个 trial。
+1. 黑屏显示“请闭眼休息 {break_countdown_s:g} s”，持续 {break_instruction_s:g} 秒。
+2. 随后进入实时波形监控页，开始 {break_countdown_s:g} 秒倒计时。
+3. 剩余 {break_chime_s:g} 秒时播放提示音，倒计时归零后开始下一个 trial。
 4. 暂停只冻结倒计时，EEG 仍持续接收、滤波和显示；点击继续会重新开始
-   完整的 30 秒倒计时。
+   完整的 {break_countdown_s:g} 秒倒计时。
 5. 组间休息期间的 EEG **不写入 HDF5，也不补零**。休息前后的 block 在
    EEG 数组中紧邻，必须通过 `block_id` 或休息事件识别时间断点。
 

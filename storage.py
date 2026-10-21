@@ -30,7 +30,7 @@ from config import (
     SAMPLE_RATE_HZ,
     SESSION_README_FILENAME,
 )
-from experiment import SessionConfig, TrialPlan, protocol_dict
+from experiment import SessionConfig, TrialPlan
 from haptics import HapticCommand
 
 HAPTIC_COMMAND_DTYPE = np.dtype([
@@ -141,9 +141,98 @@ class SessionWriter:
         self._runtime = {"demo": demo, "time_scale": time_scale}
         self._feedback_metadata = feedback_metadata
         self._feedback_dataset = None
+        self._original_metadata = {}
+        self._previous_malformed = 0
 
         self._file = h5py.File(self.path, "x")
         self._create_schema()
+
+    @classmethod
+    def resume(cls, info, *, malformed_packets_at_start: int = 0) -> "SessionWriter":
+        """准备完成后才以 r+ 打开原文件；不会创建新的 EEG 文件。"""
+        info.check_unchanged()
+        self = cls.__new__(cls)
+        self.config, self.plans, self.path = info.config, info.plans, info.path
+        self.created_at_utc = info.metadata["created_at_utc"]
+        self.recording_started_at_utc = info.metadata.get("recording_started_at_utc")
+        self.closed = False
+        self._malformed_packets_at_start = malformed_packets_at_start
+        self._previous_malformed = info.metadata.get("quality", {}).get("malformed_packets_during_session", 0)
+        self._runtime = info.metadata["runtime"]
+        self._original_metadata = {
+            k: v for k, v in info.metadata.items()
+            if k not in {"status", "quality", "termination_reason", "ended_at_utc"}
+        }
+        self._feedback_metadata = info.feedback
+        self._raw_pending, self._filtered_pending = [], []
+        self._pending_sample_count = 0
+        self._file = h5py.File(self.path, "r+")
+        try:
+            self._metadata_dataset = self._file["metadata/json"]
+            self._raw_dataset = self._file["eeg/raw_uv"]
+            self._filtered_dataset = self._file["eeg/filtered_uv"]
+            self._events_dataset = self._file["events/table"]
+            self._haptic_dataset = self._file["haptics/commands"]
+            self._trials_dataset = self._file["trials/table"]
+            self._feedback_dataset = self._file.get("self_learning/feedback")
+            self._quality_group = self._file["quality"]
+            self._trial_rows = self._trials_dataset[:]
+            self._flushed_sample_count = len(self._raw_dataset)
+            self._event_count = len(self._events_dataset)
+            # 老文件的中断记录只在真正续采时补入 README，解析/调试不修改文件。
+            record_interruption(
+                self.config.output_dir, trial_id=info.cut.completed + 1,
+                completed=info.cut.completed,
+                reason=info.metadata.get("termination_reason") or "原实验未正常结束",
+                key=info.metadata.get("ended_at_utc") or info.metadata["created_at_utc"],
+            )
+            self.recovery = self.rollback_incomplete_trials()
+            return self
+        except BaseException:
+            self._file.close()
+            self.closed = True
+            raise
+
+    def rollback_incomplete_trials(self):
+        from dataclasses import replace
+        from restart import recovery_cut
+
+        self._require_open()
+        self.flush_samples()
+        cut = recovery_cut(self._trial_rows, self._events_dataset[:])
+        self._raw_dataset.resize((cut.samples, CHANNEL_COUNT))
+        self._filtered_dataset.resize((cut.samples, CHANNEL_COUNT))
+        self._flushed_sample_count = cut.samples
+        self._events_dataset.resize((cut.events,))
+        self._event_count = cut.events
+        commands = self._haptic_dataset[:]
+        keep = (
+            (commands["sample_index"] <= cut.samples)
+            & (commands["trial_id"] <= cut.completed)
+            & (
+                ((commands["trial_id"] >= 1) & commands["success"])
+                | (commands["acknowledged_wall_time_s"] <= cut.wall_seconds)
+            )
+        ) if cut.completed else np.zeros(len(commands), dtype=bool)
+        commands = commands[keep]
+        self._haptic_dataset.resize((len(commands),))
+        self._haptic_dataset[:] = commands
+        if len(commands):
+            cut = replace(cut, wall_seconds=max(cut.wall_seconds, float(np.max(commands["acknowledged_wall_time_s"]))))
+        if self._feedback_dataset is not None:
+            rows = self._feedback_dataset[:]
+            rows = rows[(rows["trial_id"] <= cut.completed) & (rows["window_end_sample"] <= cut.samples)]
+            self._feedback_dataset.resize((len(rows),))
+            self._feedback_dataset[:] = rows
+        for field in TRIAL_DTYPE.names:
+            if field.startswith("actual_"):
+                self._trial_rows[field][cut.completed:] = np.nan
+            elif field.endswith("_sample"):
+                self._trial_rows[field][cut.completed:] = -1
+        self._trial_rows["completed"][cut.completed:] = False
+        self._trials_dataset[cut.completed:] = self._trial_rows[cut.completed:]
+        self._file.flush()
+        return cut
 
     @property
     def sample_count(self) -> int:
@@ -165,11 +254,7 @@ class SessionWriter:
         self._write_metadata_json(status="preparing")
 
         protocol = {
-            **protocol_dict(
-                self.config.break_every_trials,
-                experiment_mode=self.config.experiment_mode,
-                haptic_intensity=self.config.haptic_intensity,
-            ),
+            **self.config.protocol,
             "sample_rate_hz": SAMPLE_RATE_HZ,
             "channel_count": CHANNEL_COUNT,
             "channel_labels": list(CHANNEL_LABELS),
@@ -302,6 +387,7 @@ class SessionWriter:
 
     def _write_metadata_json(self, *, status: str, **extra: Any) -> None:
         metadata = {
+            **self._original_metadata,
             **self.config.as_serializable_dict(),
             "status": status,
             "created_at_utc": self.created_at_utc,
@@ -317,7 +403,9 @@ class SessionWriter:
 
     def begin_recording(self) -> None:
         self._require_open()
-        self.recording_started_at_utc = utc_now_iso()
+        self.recording_started_at_utc = self.recording_started_at_utc or utc_now_iso()
+        if "ended_at_utc" in self._file.attrs:
+            del self._file.attrs["ended_at_utc"]
         self._file.attrs["status"] = "recording"
         self._file.attrs["recording_started_at_utc"] = self.recording_started_at_utc
         self._write_metadata_json(status="recording")
@@ -476,7 +564,7 @@ class SessionWriter:
         sample_duration_s = recorded_samples / SAMPLE_RATE_HZ
         if wall_duration_s is None:
             wall_duration_s = actual_duration_s
-        malformed_during_session = max(
+        malformed_during_session = self._previous_malformed + max(
             0, malformed_packets_at_end - self._malformed_packets_at_start
         )
         quality = {
@@ -519,7 +607,7 @@ class SessionWriter:
 
         for key, value in quality.items():
             self._quality_group.attrs[key] = value
-        ended_at_utc = utc_now_iso()
+        ended_at_utc = self.ended_at_utc = utc_now_iso()
         self._file.attrs["status"] = status
         self._file.attrs["ended_at_utc"] = ended_at_utc
         self._write_metadata_json(
@@ -553,24 +641,38 @@ def write_session_readme(
     quality: dict[str, Any] | None = None,
     termination_reason: str = "",
 ) -> Path:
+    readme_path = config.output_dir / SESSION_README_FILENAME
+    history = read_interruption_history(readme_path)
     if config.self_learning_enabled:
         from self_learning.documentation import write_readme
-        return write_readme(config, status=status, quality=quality, reason=termination_reason)
+        path = write_readme(config, status=status, quality=quality, reason=termination_reason)
+        if history:
+            path.write_text(path.read_text(encoding="utf-8").rstrip() + "\n\n" + history, encoding="utf-8")
+        return path
     template_path = Path(__file__).resolve().parent / "templates" / "session_readme.md"
     template = template_path.read_text(encoding="utf-8")
     sequence = " ".join(
         "L" if plan.class_id == 0 else "R" for plan in plans
     )
     quality = quality or {}
+    timing = config.protocol
     content = template.format(
+        preparation_s=timing["preparation_seconds"],
+        rest_s=timing["rest_seconds"],
+        cue_end_s=timing["rest_seconds"] + timing["cue_visible_seconds"],
+        trial_s=timing["trial_seconds"],
+        task_s=timing["motor_imagery_window_seconds"],
+        break_instruction_s=timing["break_instruction_seconds"],
+        break_countdown_s=timing["break_countdown_seconds"],
+        break_chime_s=timing["break_chime_remaining_seconds"],
         experiment_mode=config.experiment_mode,
         haptic_protocol=(
             f"本次为 tactile_MI。箭头左侧对应 HapticL，右侧对应 HapticR。"
-            f"同侧从 cue 开始震动，到 trial 结束停止，计划持续 5.5 秒。"
+            f"同侧从 cue 开始震动，到 trial 结束停止，计划持续 {timing['motor_imagery_window_seconds']:g} 秒。"
             f"高档 {config.haptic_intensity:.2f}，低档 {config.haptic_low_intensity:.2f}，"
-            f"每 0.25 秒切换一次（完整高低周期 0.5 秒）。"
+            f"每 {timing['haptic_stimulation']['step_seconds']:g} 秒切换一次。"
             f"准备、trial 休息和组间休息均不施加实验震动。"
-            f"设备检查或组间休息点击震动测试，两侧以高档恒定震动 2 秒后停止；"
+            f"设备检查或组间休息点击震动测试，两侧以高档恒定震动 {timing['haptic_stimulation']['test_seconds']:g} 秒后停止；"
             f"组间测试期间暂缓倒计时，结束后从剩余时间继续。"
             if config.tactile_enabled
             else "本次为 pure_MI，无触觉刺激，不连接马达。"
@@ -606,6 +708,37 @@ def write_session_readme(
             "sample_count_time_error_ms", "尚未结束"
         ),
     )
-    readme_path = config.output_dir / SESSION_README_FILENAME
+    if history:
+        content = content.rstrip() + "\n\n" + history
     readme_path.write_text(content, encoding="utf-8")
     return readme_path
+
+
+HISTORY_MARKER = "<!-- interruption-history -->"
+
+
+def read_interruption_history(path: Path) -> str:
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        if HISTORY_MARKER in text:
+            return text[text.index(HISTORY_MARKER):]
+    return ""
+
+
+def record_interruption(output_dir: Path, *, trial_id: int, completed: int, reason: str, key: str) -> None:
+    """日志只存在 README；同一次中断在续采时不重复登记。"""
+    path = output_dir / SESSION_README_FILENAME
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    token = f"<!-- interruption:{key} -->"
+    if token in text:
+        return
+    if HISTORY_MARKER not in text:
+        text = text.rstrip() + "\n\n" + HISTORY_MARKER + "\n## 中断记录\n\n"
+        text += (
+            "续采保留完整 trial 并重做中断 trial，采样索引连续追加。\n"
+            "H5 的时间轴拼接有效采集段（wall_time_s 仍包含保留的组间休息），"
+            "不包含被删除的尝试、离线间隔和重新调试时间，不能视为不中断的物理连续采集。\n\n"
+        )
+    reason = " ".join(reason.splitlines())
+    text += f"- {key}：第 {trial_id} 个 trial 中断/待继续；已保留 {completed} 个完整 trial。原因：{reason}。 {token}\n"
+    path.write_text(text, encoding="utf-8")

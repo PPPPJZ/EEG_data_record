@@ -20,12 +20,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import (
-    BREAK_CHIME_REMAINING_SECONDS,
     BREAK_COUNTDOWN_SECONDS,
     BREAK_INSTRUCTION_SECONDS,
     CHANNEL_COUNT,
     CLASS_NONE,
-    CUE_SECONDS,
     DEFAULT_BREAK_EVERY_TRIALS,
     EVENT_BREAK_CHIME,
     EVENT_BREAK_COUNTDOWN_RESTARTED,
@@ -43,18 +41,12 @@ from config import (
     EVENT_RECORDING_START,
     EVENT_TRIAL_END,
     EVENT_TRIAL_START,
-    IMAGERY_BLACK_SECONDS,
-    PREPARATION_SECONDS,
-    REST_SECONDS,
     SAMPLE_BROADCAST_HZ,
     STATE_BROADCAST_HZ,
-    TASK_SECONDS,
     TRIAL_SECONDS,
     DEFAULT_HAPTIC_INTENSITY,
     MODE_PURE_MI,
     DEFAULT_LEARNING_TRIALS,
-    SELF_LEARNING_REST_SECONDS,
-    SELF_LEARNING_TASK_SECONDS,
     SELF_LEARNING_TRIAL_SECONDS,
     EVENT_SELF_LEARNING_START,
 )
@@ -66,12 +58,15 @@ from experiment import (
     build_trial_plans,
     build_trial_sequence,
     create_session_config,
+    protocol_dict,
 )
 from storage import (
     SessionWriter,
     ensure_empty_output_dir,
     write_session_readme,
+    record_interruption,
 )
+from restart import ResumeInfo, parse_resume_path
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -100,6 +95,10 @@ class SessionForm(BaseModel):
     output_dir: str
 
 
+class RestartForm(BaseModel):
+    path: str
+
+
 class ApplicationService:
     def __init__(
         self, *, demo: bool = False, time_scale: float = 1.0,
@@ -126,6 +125,10 @@ class ApplicationService:
         self.last_outcome = ""
         self.last_message = ""
         self.result_summary: dict | None = None
+        self._parsed_resume: ResumeInfo | None = None
+        self._resume_info: ResumeInfo | None = None
+        self._start_trial_index = 0
+        self._rollback_on_abort = False
 
         self.device_status = "等待受试者信息"
         self.device_connected = False
@@ -223,6 +226,7 @@ class ApplicationService:
                 demo=self.demo,
                 time_scale=self.time_scale,
                 scan_lock=self._scan_lock,
+                protocol=self.config.protocol["haptic_stimulation"],
             )
             await self.haptics.start()
 
@@ -309,6 +313,7 @@ class ApplicationService:
             self._break_paused = True
             self._break_requires_manual_continue = True
         elif self.stage in TRIAL_STAGES and not self._abort_scheduled:
+            self._rollback_on_abort = True
             self._recording_active = False
             self._abort_scheduled = True
             asyncio.create_task(
@@ -370,6 +375,7 @@ class ApplicationService:
             and self.stage in TRIAL_STAGES
             and not self._abort_scheduled
         ):
+            self._rollback_on_abort = True
             self._recording_active = False
             self._abort_scheduled = True
             asyncio.get_running_loop().create_task(
@@ -434,6 +440,9 @@ class ApplicationService:
             await self._stop_haptics()
             await self._stop_feedback()
             self.config = config
+            self._resume_info = None
+            self._parsed_resume = None
+            self._start_trial_index = 0
             self.sequence = build_trial_sequence(config)
             self.plans = build_trial_plans(
                 self.sequence,
@@ -466,6 +475,60 @@ class ApplicationService:
             "random_seed": config.random_seed,
         }
 
+    @property
+    def timing(self) -> dict:
+        return self.config.protocol if self.config else protocol_dict()
+
+    async def parse_restart(self, path: str) -> dict:
+        async with self._session_lock:
+            if self.stage in ACTIVE_STAGES:
+                raise ValueError("实验正在运行，不能解析续采文件")
+            self._parsed_resume = None
+            info = parse_resume_path(path)
+            info.check_runtime(demo=self.demo, time_scale=self.time_scale, mock_teacher=self.mock_teacher)
+            self._parsed_resume = info
+            return info.payload()
+
+    async def configure_restart(self) -> dict:
+        async with self._session_lock:
+            if self.stage in ACTIVE_STAGES:
+                raise ValueError("实验正在运行，不能续采")
+            if self._parsed_resume is None:
+                raise ValueError("请先解析文件")
+            info = self._parsed_resume
+            info.check_unchanged()
+            await self._stop_haptics()
+            await self._stop_feedback()
+            await self._stop_source()
+            self.config, self.plans = info.config, info.plans
+            self.sequence = [p.class_id for p in info.plans]
+            self._resume_info = info
+            self._start_trial_index = info.cut.completed
+            self._trial_index = -1
+            self.session_locked = False
+            self.last_outcome = ""
+            self.result_summary = None
+            self.last_message = (
+                f"已完成 {info.cut.completed} / {info.config.total_trials} 个 trial；"
+                f"设备调试后从第 {info.cut.completed + 1} 个继续，追加到原文件。"
+            )
+            self.stage = "device_check"
+            self._clear_sample_queue()
+            if info.config.self_learning_enabled:
+                from self_learning.runtime import FeedbackRuntime
+                self.feedback = FeedbackRuntime(
+                    info.config.teacher_model_path, device=self.teacher_device,
+                    mock=self.mock_teacher, time_scale=self.time_scale,
+                    on_prediction=self._on_feedback_prediction, on_fault=self._on_feedback_fault,
+                    saved_config=info.feedback["config"],
+                    expected_sha256=info.feedback["load_info"]["sha256"],
+                )
+                await self.feedback.start()
+            await self._start_source()
+            await self._start_haptics()
+        await self.broadcast({"type": "state", **self.state_payload()})
+        return {"ok": True}
+
     async def new_session(self) -> None:
         async with self._session_lock:
             if self.stage in ACTIVE_STAGES:
@@ -474,6 +537,9 @@ class ApplicationService:
             await self._stop_feedback()
             await self._stop_source()
             self.config = None
+            self._resume_info = None
+            self._parsed_resume = None
+            self._start_trial_index = 0
             self.sequence = []
             self.plans = []
             self.session_locked = False
@@ -506,44 +572,47 @@ class ApplicationService:
                     raise ValueError("请等待模型测试结束")
                 self.feedback.disable()
 
-            ensure_empty_output_dir(self.config.output_dir)
+            if self._resume_info:
+                self._resume_info.check_unchanged()
+            else:
+                ensure_empty_output_dir(self.config.output_dir)
             try:
-                self.writer = SessionWriter(
-                    self.config,
-                    self.plans,
-                    malformed_packets_at_start=self._malformed_packets(),
-                    demo=self.demo,
-                    time_scale=self.time_scale,
-                    feedback_metadata=self.feedback.state_payload() if self.feedback else None,
-                )
-                write_session_readme(
-                    self.config,
-                    self.plans,
-                    status="preparing",
-                )
+                if not self._resume_info:
+                    self.writer = SessionWriter(
+                        self.config,
+                        self.plans,
+                        malformed_packets_at_start=self._malformed_packets(),
+                        demo=self.demo,
+                        time_scale=self.time_scale,
+                        feedback_metadata=self.feedback.state_payload() if self.feedback else None,
+                    )
+                    write_session_readme(self.config, self.plans, status="preparing")
             except Exception:
                 if self.writer is not None:
                     self.writer.discard_before_recording()
                     self.writer = None
-                (self.config.output_dir / "README.md").unlink(missing_ok=True)
+                if not self._resume_info:
+                    (self.config.output_dir / "README.md").unlink(missing_ok=True)
                 raise
             self.last_outcome = ""
             self.last_message = ""
             self.result_summary = None
             self._trial_index = -1
+            self._rollback_on_abort = False
+            self._abort_scheduled = False
             self._recording_active = False
             self._recording_t0_wall = None
             self._active_clock_origin_wall = None
             self._active_clock_offset_s = 0.0
             self._schedule_origin_wall = None
-            self._break_remaining_s = BREAK_COUNTDOWN_SECONDS
+            self._break_remaining_s = self.timing["break_countdown_seconds"]
             self._break_paused = False
             self._break_chime_emitted = False
             self._break_chime_serial = 0
             self._break_after_trial_id = -1
             self._break_signal_lost = False
             self._break_requires_manual_continue = False
-            self._set_phase("preparing", PREPARATION_SECONDS)
+            self._set_phase("preparing", self.timing["preparation_seconds"])
             self._experiment_task = asyncio.create_task(
                 self._run_experiment(),
                 name="motor-imagery-experiment",
@@ -557,6 +626,8 @@ class ApplicationService:
 
     async def _sleep_until(self, deadline_wall: float) -> None:
         while True:
+            if self._abort_scheduled:
+                raise asyncio.CancelledError
             remaining = deadline_wall - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return
@@ -649,7 +720,7 @@ class ApplicationService:
                     raise ValueError("EEG 信号或触觉设备尚未就绪，不能继续")
                 if self.haptics is not None and self.haptics.busy:
                     raise ValueError("请等待震动测试结束后继续")
-                self._break_remaining_s = BREAK_COUNTDOWN_SECONDS
+                self._break_remaining_s = self.timing["break_countdown_seconds"]
                 self._break_chime_emitted = False
                 self._break_paused = False
                 self._break_requires_manual_continue = False
@@ -671,14 +742,14 @@ class ApplicationService:
             self.writer.flush_samples()
 
         self._break_after_trial_id = completed_plan.trial_id
-        self._set_phase("break_instruction", BREAK_INSTRUCTION_SECONDS)
+        self._set_phase("break_instruction", self.timing["break_instruction_seconds"])
         self._record_break_event(EVENT_BREAK_INSTRUCTION_START)
         await self._sleep_until(
-            loop.time() + BREAK_INSTRUCTION_SECONDS * self.time_scale
+            loop.time() + self.timing["break_instruction_seconds"] * self.time_scale
         )
 
-        self._set_phase("break_monitor", BREAK_COUNTDOWN_SECONDS)
-        self._break_remaining_s = BREAK_COUNTDOWN_SECONDS
+        self._set_phase("break_monitor", self.timing["break_countdown_seconds"])
+        self._break_remaining_s = self.timing["break_countdown_seconds"]
         self._break_chime_emitted = False
         self._break_paused = (
             self._break_requires_manual_continue
@@ -707,9 +778,9 @@ class ApplicationService:
                 )
                 if (
                     not self._break_chime_emitted
-                    and previous_remaining > BREAK_CHIME_REMAINING_SECONDS
+                    and previous_remaining > self.timing["break_chime_remaining_seconds"]
                     and self._break_remaining_s
-                    <= BREAK_CHIME_REMAINING_SECONDS
+                    <= self.timing["break_chime_remaining_seconds"]
                 ):
                     self._break_chime_emitted = True
                     self._break_chime_serial += 1
@@ -729,7 +800,7 @@ class ApplicationService:
     async def _run_experiment(self) -> None:
         try:
             loop = asyncio.get_running_loop()
-            prep_deadline = loop.time() + PREPARATION_SECONDS * self.time_scale
+            prep_deadline = loop.time() + self.timing["preparation_seconds"] * self.time_scale
             await self._sleep_until(prep_deadline)
             if (
                 not self.device_connected or not self._has_valid_signal
@@ -739,26 +810,34 @@ class ApplicationService:
                     "准备阶段结束时 EEG 信号或触觉设备未就绪"
                 )
                 return
+            recovery = None
+            if self._resume_info:
+                self.writer = SessionWriter.resume(
+                    self._resume_info, malformed_packets_at_start=self._malformed_packets(),
+                )
+                recovery = self.writer.recovery
             if self.writer is None:
                 raise RuntimeError("session writer was not created")
 
-            self._recording_t0_wall = loop.time()
-            self._active_clock_origin_wall = self._recording_t0_wall
-            self._active_clock_offset_s = 0.0
-            self._schedule_origin_wall = self._recording_t0_wall
+            now = loop.time()
+            self._recording_t0_wall = now - (recovery.wall_seconds if recovery else 0) * self.time_scale
+            self._active_clock_origin_wall = now
+            self._active_clock_offset_s = recovery.active_seconds if recovery else 0
+            self._schedule_origin_wall = now - self.plans[self._start_trial_index].planned_rest_start_s * self.time_scale
             self.writer.begin_recording()
             self._recording_active = False
-            self._record_event(
-                event_code=EVENT_RECORDING_START,
-                trial_id=-1,
-                class_id=CLASS_NONE,
-                planned_time_s=0.0,
-            )
+            if self._start_trial_index == 0:
+                self._record_event(
+                    event_code=EVENT_RECORDING_START, trial_id=-1,
+                    class_id=CLASS_NONE, planned_time_s=0.0,
+                )
 
-            for index, plan in enumerate(self.plans):
+            for index in range(self._start_trial_index, len(self.plans)):
+                plan = self.plans[index]
                 if (
                     index > 0
                     and index % self.config.break_every_trials == 0
+                    and not (index == self._start_trial_index and recovery and recovery.break_completed)
                 ):
                     await self._run_interblock_break(
                         self.plans[index - 1],
@@ -776,7 +855,7 @@ class ApplicationService:
                 if self.feedback:
                     self.feedback.disable()
                 self._set_phase(
-                    "rest", SELF_LEARNING_REST_SECONDS if self.config.self_learning_enabled else REST_SECONDS
+                    "rest", plan.planned_cue_start_s - plan.planned_rest_start_s
                 )
                 self._record_event(
                     event_code=EVENT_TRIAL_START,
@@ -794,7 +873,7 @@ class ApplicationService:
                 await self._sleep_until(cue_deadline)
                 if self.config.self_learning_enabled:
                     self._task_started_wall = loop.time()
-                    self._set_phase("self_learning", SELF_LEARNING_TASK_SECONDS)
+                    self._set_phase("self_learning", self.timing["motor_imagery_window_seconds"])
                     self._record_event(
                         event_code=EVENT_SELF_LEARNING_START, trial_id=plan.trial_id,
                         class_id=CLASS_NONE, planned_time_s=plan.planned_cue_start_s,
@@ -815,10 +894,9 @@ class ApplicationService:
                         class_id=CLASS_NONE, planned_time_s=plan.planned_trial_end_s,
                         boundary="trial_end",
                     )
-                    if (index + 1) % self.config.break_every_trials == 0 and index + 1 < len(self.plans):
-                        self._recording_active = False
+                    self._recording_active = False
                     continue
-                self._set_phase("cue", CUE_SECONDS)
+                self._set_phase("cue", plan.planned_cue_end_s - plan.planned_cue_start_s)
                 self._task_started_wall = loop.time()
                 trial_end_deadline = (
                     self._schedule_origin_wall
@@ -851,7 +929,7 @@ class ApplicationService:
                     + plan.planned_cue_end_s * self.time_scale
                 )
                 await self._sleep_until(cue_end_deadline)
-                self._set_phase("imagery", IMAGERY_BLACK_SECONDS)
+                self._set_phase("imagery", plan.planned_trial_end_s - plan.planned_cue_end_s)
                 self._record_event(
                     event_code=EVENT_CUE_END,
                     trial_id=plan.trial_id,
@@ -872,16 +950,12 @@ class ApplicationService:
                     planned_time_s=plan.planned_trial_end_s,
                     boundary="trial_end",
                 )
-                if (
-                    (index + 1) % self.config.break_every_trials == 0
-                    and index + 1 < len(self.plans)
-                ):
-                    self._recording_active = False
+                self._recording_active = False
                 if self.haptics is not None:
                     await self.haptics.stop_stimulation()
 
             async with self._session_lock:
-                if self.writer is None:
+                if self.writer is None or self._abort_scheduled:
                     return
                 actual_duration = self._record_event(
                     event_code=EVENT_RECORDING_COMPLETE,
@@ -897,12 +971,6 @@ class ApplicationService:
                     wall_duration_s=self._wall_elapsed(),
                     malformed_packets_at_end=self._malformed_packets(),
                 )
-                write_session_readme(
-                    self.config,
-                    self.plans,
-                    status="complete",
-                    quality=quality,
-                )
                 self.writer = None
                 self.session_locked = True
                 self.stage = "complete"
@@ -916,6 +984,12 @@ class ApplicationService:
                 self._schedule_origin_wall = None
                 self._task_started_wall = None
                 self._abort_scheduled = False
+                try:
+                    write_session_readme(self.config, self.plans, status="complete", quality=quality)
+                except Exception as exc:
+                    # H5 已成功关闭；文档失败不能再尝试向已关闭的文件写 abort。
+                    self.last_message = f"H5 已 complete，但 README 更新失败：{exc}"
+                    logging.exception(self.last_message)
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001 - 任意运行错误都要安全结束文件
@@ -933,6 +1007,7 @@ class ApplicationService:
                 self._abort_scheduled = False
                 return
             task = self._experiment_task
+            self._abort_scheduled = True
             if cancel_task and task is not None and task is not asyncio.current_task():
                 task.cancel()
 
@@ -945,6 +1020,7 @@ class ApplicationService:
             if was_recording:
                 self._pause_active_clock()
             quality: dict | None = None
+            readme_error = ""
             if self.writer is not None:
                 if was_recording:
                     actual_duration = self._active_elapsed()
@@ -963,6 +1039,10 @@ class ApplicationService:
                         ),
                         planned_time_s=actual_duration,
                     )
+                    cut = None
+                    if self._rollback_on_abort:
+                        cut = self.writer.rollback_incomplete_trials()
+                        actual_duration, wall_duration = cut.active_seconds, cut.wall_seconds
                     quality = self.writer.finalize(
                         status="incomplete",
                         actual_duration_s=actual_duration,
@@ -970,13 +1050,21 @@ class ApplicationService:
                         malformed_packets_at_end=self._malformed_packets(),
                         reason=reason,
                     )
-                    write_session_readme(
-                        self.config,
-                        self.plans,
-                        status="incomplete",
-                        quality=quality,
-                        termination_reason=reason,
-                    )
+                    ended_at = self.writer.ended_at_utc
+                    self.writer = None
+                    try:
+                        record_interruption(
+                            self.config.output_dir,
+                            trial_id=min(quality["completed_trials"] + 1, len(self.plans)),
+                            completed=quality["completed_trials"], reason=reason, key=ended_at,
+                        )
+                        write_session_readme(
+                            self.config, self.plans, status="incomplete",
+                            quality=quality, termination_reason=reason,
+                        )
+                    except Exception as exc:
+                        readme_error = f"；README 更新失败：{exc}"
+                        logging.exception(readme_error)
                 else:
                     self.writer.discard_before_recording()
                     if self.config is not None:
@@ -989,10 +1077,11 @@ class ApplicationService:
             self.stage = "device_check"
             self.last_outcome = "incomplete" if was_recording else "cancelled"
             self.last_message = (
-                f"实验已中断并保留不完整数据：{reason}"
+                (f"实验已中断，已删除当前未完成 trial，保留 {quality['completed_trials']} 个完整 trial：{reason}"
+                 if self._rollback_on_abort and quality else f"实验已中断并保存已有数据：{reason}")
                 if was_recording
                 else f"准备已取消，未保存 EEG 数据：{reason}"
-            )
+            ) + readme_error
             self.result_summary = quality
             self._experiment_task = None
             self._recording_t0_wall = None
@@ -1027,13 +1116,18 @@ class ApplicationService:
         elapsed_protocol = (
             asyncio.get_running_loop().time() - self._task_started_wall
         ) / self.time_scale
-        duration = SELF_LEARNING_TASK_SECONDS if self.config and self.config.self_learning_enabled else TASK_SECONDS
+        duration = self.timing["motor_imagery_window_seconds"]
         return min(1.0, max(0.0, elapsed_protocol / duration))
 
     def state_payload(self) -> dict:
         config = self.config
         payload = {
             "stage": self.stage,
+            "restart": self._resume_info.payload() if self._resume_info else None,
+            "data_path": str(self._resume_info.path) if self._resume_info else (
+                str(config.output_dir / "motor_imagery.h5") if config else ""
+            ),
+            "break_countdown_seconds": self.timing["break_countdown_seconds"],
             "configured": config is not None,
             "device_status": self.device_status,
             "device_connected": self.device_connected,
@@ -1091,7 +1185,7 @@ class ApplicationService:
                 else (
                     len(self.plans) - self._trial_index
                     if 0 <= self._trial_index < len(self.plans)
-                    else len(self.plans)
+                    else len(self.plans) - self._start_trial_index
                 )
             ),
             "cue_direction": (
@@ -1122,7 +1216,10 @@ class ApplicationService:
                 and not (self.haptics is not None and self.haptics.busy)
             ),
             "break_chime_serial": self._break_chime_serial,
-            "completed_trials": max(0, self._trial_index + 1),
+            "completed_trials": (
+                int(np.count_nonzero(self.writer._trial_rows["completed"])) if self.writer
+                else (self.result_summary or {}).get("completed_trials", self._start_trial_index)
+            ),
         }
 
         if self.stage == "preparing":
@@ -1135,7 +1232,7 @@ class ApplicationService:
                 / self.time_scale
             )
             payload["preparation_remaining"] = max(
-                0, math.ceil(PREPARATION_SECONDS - elapsed)
+                0, math.ceil(self.timing["preparation_seconds"] - elapsed)
             )
         elif self.stage == "rest":
             payload["progress"] = self._phase_progress()
@@ -1289,6 +1386,20 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True}
+
+    @web_app.post("/api/restart/parse")
+    async def parse_restart(form: RestartForm):
+        try:
+            return await service.parse_restart(form.path)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @web_app.post("/api/restart/continue")
+    async def continue_restart():
+        try:
+            return await service.configure_restart()
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @web_app.post("/api/self-learning/preview/{action}")
     async def preview_feedback(action: Literal["start", "stop", "reset"]):

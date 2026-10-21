@@ -113,10 +113,19 @@ textarea:focus-visible {
 
 .mode-selection {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 24px;
   width: min(920px, calc(100% - 40px));
   margin: 64px auto;
+}
+
+.restart-summary {
+  margin-top: 24px;
+  padding: 16px 24px;
+  background: #f0f7f6;
+  border-left: 4px solid #0d716f;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
 }
 
 .mode-card {

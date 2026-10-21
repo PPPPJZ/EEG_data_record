@@ -1,9 +1,11 @@
 """生成自主学习会话的中文数据说明。"""
-from config import SELF_LEARNING_REST_SECONDS, SELF_LEARNING_TASK_SECONDS, SAMPLE_RATE_HZ
+from config import SAMPLE_RATE_HZ
 
 
 def write_readme(config, *, status, quality=None, reason=""):
     quality = quality or {}
+    timing = config.protocol
+    rest, trial = timing["rest_seconds"], timing["trial_seconds"]
     text = f"""# 自主学习 EEG 实验记录
 
 受试者：{config.subject_id}；日期：{config.experiment_date}；模式：self_learning。
@@ -12,22 +14,22 @@ def write_readme(config, *, status, quality=None, reason=""):
 学习 trial：{config.total_trials}；每 {config.break_every_trials} 个 trial 组间休息。
 Teacher：{config.teacher_model_path}。
 
-开始采集后先准备 5 秒，此时不保存 EEG。每个 trial 共
-{SELF_LEARNING_REST_SECONDS + SELF_LEARNING_TASK_SECONDS:g} 秒：
-0–{SELF_LEARNING_REST_SECONDS:g} 秒休息并自主决定想象哪一侧；
-{SELF_LEARNING_REST_SECONDS:g}–
-{SELF_LEARNING_REST_SECONDS + SELF_LEARNING_TASK_SECONDS:g} 秒运动想象，
+开始采集后先准备 {timing['preparation_seconds']:g} 秒，此时不保存 EEG。每个 trial 共
+{trial:g} 秒：
+0–{rest:g} 秒休息并自主决定想象哪一侧；
+{rest:g}–{trial:g} 秒运动想象，
 显示蓝色小球，不显示左右指令。
 每次控制开始时重置小球、EMA 和原始缓冲；收齐本次想象 750 点后开始推理，
-即通常在 trial 第 6 秒出现首次反馈，之后每 40 ms 尝试推理最近的完整窗口。
+即通常在 trial 第 {rest + 3:g} 秒出现首次反馈，之后按保存的间隔尝试推理最近的完整窗口。
 实际间隔及控制参数以 H5 self_learning/config_json 为准。
 
 受试者的真实选择没有记录。trials/table 的 class_id=-1 表示未知，
 teacher 概率和预测类别只表示模型判断，不能用于准确率评估或直接当作训练标签。
 模型在本阶段保持固定，不进行再训练或权重更新。
 
-组间休息：3 秒闭眼提示，再监控波形 30 秒；剩余 6 秒提示音。
-暂停后继续重新计时 30 秒，断连要求信号恢复并手动继续。
+组间休息：{timing['break_instruction_seconds']:g} 秒闭眼提示，再监控波形 {timing['break_countdown_seconds']:g} 秒；
+剩余 {timing['break_chime_remaining_seconds']:g} 秒提示音。
+暂停后继续重新计时 {timing['break_countdown_seconds']:g} 秒，断连要求信号恢复并手动继续。
 组间休息不写 EEG。Esc 中止并保留已采集数据。
 
 H5 为唯一机器可读数据源：
