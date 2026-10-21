@@ -140,3 +140,65 @@ def split_fold_indices(fold_ids: np.ndarray, test_fold: int) -> tuple[np.ndarray
     validation = np.flatnonzero(folds == validation_fold)
     test = np.flatnonzero(folds == test_fold)
     return train, validation, test
+
+
+def balance_binary_indices(
+    indices: np.ndarray, labels: np.ndarray, seed: int
+) -> np.ndarray:
+    """确定性打乱后欠采样多数类，使所选 0/1 标签数量严格相等。"""
+    selected = np.asarray(indices, dtype=np.int64)
+    classes = np.asarray(labels, dtype=np.int64)
+    if selected.ndim != 1 or classes.ndim != 1:
+        raise ValueError("indices 和 labels 必须为一维数组")
+    if len(np.unique(selected)) != len(selected):
+        raise ValueError("indices 不可重复")
+    if np.any(selected < 0) or np.any(selected >= len(classes)):
+        raise ValueError("indices 超出 labels 范围")
+    if not np.isin(classes, [0, 1]).all():
+        raise ValueError("labels 必须为 0/1")
+
+    by_class = [selected[classes[selected] == class_id] for class_id in (0, 1)]
+    balanced_count = min(map(len, by_class))
+    if balanced_count == 0:
+        raise ValueError("平衡集合必须同时包含左手和右手标签")
+
+    rng = np.random.default_rng(seed)
+    balanced = np.concatenate(
+        [rng.permutation(class_indices)[:balanced_count] for class_indices in by_class]
+    )
+    return np.asarray(rng.permutation(balanced), dtype=np.int64)
+
+
+def balanced_train_validation_split(
+    fold_ids: np.ndarray, labels: np.ndarray, test_fold: int, seed: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """保持原始 test，仅对 train/val 分别随机欠采样为严格 1:1。"""
+    classes = np.asarray(labels, dtype=np.int64)
+    if len(fold_ids) != len(classes):
+        raise ValueError("fold_ids 与 labels 长度不一致")
+    train_original, validation_original, test = split_fold_indices(
+        fold_ids, test_fold
+    )
+    train = balance_binary_indices(train_original, classes, seed)
+    validation = balance_binary_indices(
+        validation_original, classes, seed + 1_000_003
+    )
+
+    def counts(indices: np.ndarray) -> list[int]:
+        return np.bincount(classes[indices], minlength=2).astype(int).tolist()
+
+    summary = {
+        "method": "deterministic_random_undersampling",
+        "train_original_class_counts": counts(train_original),
+        "train_balanced_class_counts": counts(train),
+        "validation_original_class_counts": counts(validation_original),
+        "validation_balanced_class_counts": counts(validation),
+        "test_class_counts": counts(test),
+        "dropped_train_indices": np.setdiff1d(
+            train_original, train, assume_unique=True
+        ).astype(int).tolist(),
+        "dropped_validation_indices": np.setdiff1d(
+            validation_original, validation, assume_unique=True
+        ).astype(int).tolist(),
+    }
+    return train, validation, test, summary

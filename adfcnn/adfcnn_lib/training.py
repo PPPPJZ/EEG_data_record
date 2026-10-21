@@ -7,7 +7,9 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from .config import ModelConfig, TrainingConfig
-from .data import SessionData, split_fold_indices
+from .data import (
+    SessionData, balanced_train_validation_split, split_fold_indices,
+)
 from .model import ADFCNN
 from .runtime import resolve_device, set_seed
 
@@ -20,6 +22,10 @@ class FoldResult:
     validation_loss: float
     test_accuracy: float
     training_seed: int
+    train_indices: np.ndarray
+    validation_indices: np.ndarray
+    test_indices: np.ndarray
+    class_balance: dict
 
 
 def make_loader(
@@ -62,11 +68,39 @@ def train_fold(
     progress: Callable[[int, float, float], None] | None = None,
 ) -> FoldResult:
     architecture = ModelConfig() if model_config is None else model_config
-    train_indices, validation_indices, test_indices = split_fold_indices(fold_ids, test_fold)
     if len(fold_ids) != len(session.labels):
         raise ValueError("fold_ids 与 trial 数量不一致")
     # 每折使用独立且确定的模型初始化；teacher 与 results 的第一折一致。
     training_seed = seed + test_fold - 1
+    if config.balance_train_validation:
+        (
+            train_indices,
+            validation_indices,
+            test_indices,
+            class_balance,
+        ) = balanced_train_validation_split(
+            fold_ids, session.labels, test_fold, training_seed
+        )
+    else:
+        train_indices, validation_indices, test_indices = split_fold_indices(
+            fold_ids, test_fold
+        )
+
+        def counts(indices: np.ndarray) -> list[int]:
+            return np.bincount(
+                session.labels[indices], minlength=2
+            ).astype(int).tolist()
+
+        class_balance = {
+            "method": "none",
+            "train_original_class_counts": counts(train_indices),
+            "train_balanced_class_counts": counts(train_indices),
+            "validation_original_class_counts": counts(validation_indices),
+            "validation_balanced_class_counts": counts(validation_indices),
+            "test_class_counts": counts(test_indices),
+            "dropped_train_indices": [],
+            "dropped_validation_indices": [],
+        }
     set_seed(training_seed)
     device = resolve_device(config.device)
     train_loader = make_loader(session, train_indices, config, device, True, training_seed)
@@ -106,4 +140,6 @@ def train_fold(
     return FoldResult(
         state_dict=best_state, best_epoch=best_epoch, validation_accuracy=best_accuracy,
         validation_loss=best_loss, test_accuracy=test_accuracy, training_seed=training_seed,
+        train_indices=train_indices, validation_indices=validation_indices,
+        test_indices=test_indices, class_balance=class_balance,
     )

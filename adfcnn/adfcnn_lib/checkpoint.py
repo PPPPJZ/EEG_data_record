@@ -24,7 +24,30 @@ def save_teacher(
     training: TrainingConfig, model_config: ModelConfig,
 ) -> Path:
     path = Path(destination).expanduser().resolve()
-    train, validation, test = split_fold_indices(fold_ids, test_fold)
+    if len(fold_ids) != len(session.labels):
+        raise ValueError("fold_ids 与 trial 数量不一致")
+    train = result.train_indices
+    validation = result.validation_indices
+    test = result.test_indices
+    original_train, original_validation, original_test = split_fold_indices(
+        fold_ids, test_fold
+    )
+    if (
+        not set(train).issubset(original_train)
+        or not set(validation).issubset(original_validation)
+        or not np.array_equal(np.sort(test), original_test)
+    ):
+        raise ValueError("训练结果的平衡划分与 fold_ids 不一致")
+    class_balance = {
+        key: value for key, value in result.class_balance.items()
+        if key not in {"dropped_train_indices", "dropped_validation_indices"}
+    }
+    class_balance["dropped_train_trial_ids"] = session.trial_ids[
+        result.class_balance["dropped_train_indices"]
+    ].tolist()
+    class_balance["dropped_validation_trial_ids"] = session.trial_ids[
+        result.class_balance["dropped_validation_indices"]
+    ].tolist()
     payload = {
         "checkpoint_version": CHECKPOINT_VERSION,
         "model_version": MODEL_VERSION,
@@ -40,6 +63,7 @@ def save_teacher(
         "training_seed": result.training_seed,
         "test_fold": test_fold,
         "validation_fold": test_fold % N_FOLDS + 1,
+        "class_balance": class_balance,
         "train_trial_ids": session.trial_ids[train].tolist(),
         "validation_trial_ids": session.trial_ids[validation].tolist(),
         "test_trial_ids": session.trial_ids[test].tolist(),

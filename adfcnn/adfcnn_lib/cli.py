@@ -20,12 +20,26 @@ def training_from_args(args: argparse.Namespace, defaults: TrainingConfig) -> Tr
         epochs=args.epochs, batch_size=args.batch_size,
         learning_rate=defaults.learning_rate, weight_decay=defaults.weight_decay,
         device=args.device, num_workers=defaults.num_workers,
+        balance_train_validation=defaults.balance_train_validation,
     )
 
 
 def describe_session(session: SessionData) -> None:
     print(f"Data: {session.source_path}", file=sys.stderr, flush=True)
     print(f"Trials: {session.summary}", file=sys.stderr, flush=True)
+
+
+def describe_balance(label: str, summary: dict) -> None:
+    print(
+        f"{label} class_balance: "
+        f"train {summary['train_original_class_counts']} -> "
+        f"{summary['train_balanced_class_counts']}; "
+        f"val {summary['validation_original_class_counts']} -> "
+        f"{summary['validation_balanced_class_counts']}; "
+        f"test {summary['test_class_counts']} unchanged",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def epoch_reporter(label: str, epochs: int) -> Callable[[int, float, float], None]:

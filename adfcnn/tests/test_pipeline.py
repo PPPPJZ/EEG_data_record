@@ -11,7 +11,10 @@ import numpy as np
 import torch
 from adfcnn_lib.checkpoint import save_teacher
 from adfcnn_lib.config import ModelConfig, PreprocessingConfig, RESULTS_SEEDS, TrainingConfig
-from adfcnn_lib.data import load_session, make_folds, split_fold_indices
+from adfcnn_lib.data import (
+    SessionData, balanced_train_validation_split, load_session, make_folds,
+    split_fold_indices,
+)
 from adfcnn_lib.inference import Predictor
 from adfcnn_lib.model import ADFCNN
 from adfcnn_lib.preprocessing import preprocess_window
@@ -20,7 +23,9 @@ from adfcnn_lib.training import train_fold
 # 测试参数配置区：短训、CPU、临时目录，不修改正式实验默认值。
 TEST_SEED = 19
 TEST_TRIALS = 10
-TEST_TRAINING = TrainingConfig(epochs=3, batch_size=4, device="cpu")
+TEST_TRAINING = TrainingConfig(
+    epochs=3, batch_size=4, device="cpu", balance_train_validation=True
+)
 
 
 def create_session(path: Path) -> None:
@@ -103,6 +108,40 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(sorted(all_test), list(range(10)))
             self.assertEqual(sorted(all_validation), list(range(10)))
 
+    def test_imbalanced_labels_keep_test_and_balance_train_validation(self) -> None:
+        labels = np.array([0] * 10 + [1] * 5, dtype=np.int64)
+        folds = make_folds(labels, TEST_SEED)
+        original_train, original_validation, original_test = split_fold_indices(
+            folds, 1
+        )
+        train, validation, test, summary = balanced_train_validation_split(
+            folds, labels, 1, TEST_SEED
+        )
+        repeated = balanced_train_validation_split(
+            folds, labels, 1, TEST_SEED
+        )
+
+        np.testing.assert_array_equal(train, repeated[0])
+        np.testing.assert_array_equal(validation, repeated[1])
+        np.testing.assert_array_equal(test, original_test)
+        self.assertTrue(set(train).issubset(original_train))
+        self.assertTrue(set(validation).issubset(original_validation))
+        np.testing.assert_array_equal(
+            np.bincount(labels[train], minlength=2), [3, 3]
+        )
+        np.testing.assert_array_equal(
+            np.bincount(labels[validation], minlength=2), [1, 1]
+        )
+        np.testing.assert_array_equal(
+            np.bincount(labels[test], minlength=2), [2, 1]
+        )
+        self.assertEqual(summary["train_original_class_counts"], [6, 3])
+        self.assertEqual(summary["train_balanced_class_counts"], [3, 3])
+        self.assertEqual(summary["validation_original_class_counts"], [2, 1])
+        self.assertEqual(summary["validation_balanced_class_counts"], [1, 1])
+        self.assertEqual(len(summary["dropped_train_indices"]), 3)
+        self.assertEqual(len(summary["dropped_validation_indices"]), 1)
+
     def test_invalid_window_or_nonfinite_values_fail(self) -> None:
         for values in (np.zeros((8, 750)), np.zeros((749, 8)), np.full((750, 8), np.nan), np.zeros((750, 8), dtype=complex)):
             with self.assertRaises(ValueError):
@@ -148,6 +187,16 @@ class PipelineTests(unittest.TestCase):
         save_teacher(checkpoint, self.session, result, folds, 1, TEST_SEED, TEST_TRAINING, ModelConfig())
         payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
         self.assertEqual(payload["preprocessing_config"], asdict(self.session.preprocessing))
+        self.assertEqual(
+            payload["class_balance"]["method"],
+            "deterministic_random_undersampling",
+        )
+        self.assertEqual(
+            payload["class_balance"]["train_balanced_class_counts"], [3, 3]
+        )
+        self.assertEqual(
+            payload["class_balance"]["validation_balanced_class_counts"], [1, 1]
+        )
         train_ids, val_ids, test_ids = (set(payload[key]) for key in ("train_trial_ids", "validation_trial_ids", "test_trial_ids"))
         self.assertFalse(train_ids & val_ids or train_ids & test_ids or val_ids & test_ids)
         predictor = Predictor(checkpoint, device="cpu")
@@ -171,6 +220,48 @@ class PipelineTests(unittest.TestCase):
         torch.save(payload, checkpoint)
         with self.assertRaisesRegex(ValueError, "不兼容"):
             Predictor(checkpoint, device="cpu")
+
+    def test_checkpoint_records_only_actual_balanced_trial_ids(self) -> None:
+        labels = np.array([0] * 10 + [1] * 5, dtype=np.int64)
+        rng = np.random.default_rng(TEST_SEED)
+        session = SessionData(
+            source_path=self.path,
+            inputs=rng.normal(size=(15, 1, 8, 750)).astype(np.float32),
+            labels=labels,
+            trial_ids=np.arange(101, 116, dtype=np.int64),
+            preprocessing=PreprocessingConfig(),
+            summary={"class_counts": [10, 5]},
+        )
+        folds = make_folds(labels, TEST_SEED)
+        training = TrainingConfig(
+            epochs=1, batch_size=4, device="cpu",
+            balance_train_validation=True,
+        )
+        result = train_fold(session, folds, 1, TEST_SEED, training)
+        checkpoint = Path(self.temporary.name) / "imbalanced_teacher.pt"
+        save_teacher(
+            checkpoint, session, result, folds, 1, TEST_SEED,
+            training, ModelConfig(),
+        )
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        labels_by_trial = dict(zip(session.trial_ids.tolist(), labels.tolist()))
+
+        for key in ("train_trial_ids", "validation_trial_ids"):
+            saved_labels = [labels_by_trial[trial_id] for trial_id in payload[key]]
+            counts = np.bincount(saved_labels, minlength=2)
+            self.assertEqual(int(counts[0]), int(counts[1]))
+        self.assertEqual(
+            payload["class_balance"]["train_original_class_counts"], [6, 3]
+        )
+        self.assertEqual(
+            payload["class_balance"]["train_balanced_class_counts"], [3, 3]
+        )
+        self.assertEqual(
+            len(payload["class_balance"]["dropped_train_trial_ids"]), 3
+        )
+        self.assertEqual(
+            len(payload["class_balance"]["dropped_validation_trial_ids"]), 1
+        )
 
 
 if __name__ == "__main__":

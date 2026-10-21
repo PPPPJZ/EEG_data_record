@@ -30,7 +30,7 @@ python results.py --data "D:\data_record\Haoyu_Xu\pure_MI_1\motor_imagery.h5"
 Accuracy: xx.xx%
 ```
 
-读取后先用固定 seed `42` 同步打乱 trial、标签和 trial ID。随后对实验 seed `42、2024、3407` 分别建立分层五折，每类尽量均匀分配，每折 trial 总数至多相差 1。test 依次为 fold 1–5，val 为 test 的下一折（fold 5 后回到 fold 1），其余三折训练。一个 seed 训练五次，所有 trial 各做一次 test，共 15 次实验。
+读取后先用固定 seed `42` 同步打乱 trial、标签和 trial ID。随后对实验 seed `42、2024、3407` 分别建立分层五折，每类尽量均匀分配，每折 trial 总数至多相差 1。test 依次为 fold 1–5，val 为 test 的下一折（fold 5 后回到 fold 1），其余三折训练。`results.py` 不做额外欠采样，保持原有基准协议。一个 seed 训练五次，所有 trial 各做一次 test，共 15 次实验。
 
 Accuracy 是 15 次 **Test Accuracy 的算术平均值**，每个 test Accuracy 来自验证集选出的最佳模型。不是训练集准确率，也不是所有预测合并后按 trial 数加权的准确率。每次实验都重新初始化模型、优化器和学习率调度器。
 
@@ -48,7 +48,7 @@ python results.py --data "D:\data_record\Haoyu_Xu\pure_MI_1\motor_imagery.h5" --
 python teacher.py --data "D:\data_record\Haoyu_Xu\pure_MI_1\motor_imagery.h5"
 ```
 
-teacher 固定 split seed `42`，只执行一次：fold 1=test、fold 2=val、fold 3–5=train。最佳模型通过验证集选择，随后在 test 上评估一次，不使用 test 调参，也不再用全量数据重训。默认输出：
+teacher 固定 split seed `42`，只执行一次：fold 1=test、fold 2=val、fold 3–5=train。train 与 val 在各自集合内独立、确定性地打乱并随机欠采样多数类，确保左右手 trial 数严格相等；test 保留原始类别数量。最佳模型通过验证集选择，随后在 test 上评估一次，不使用 test 调参，也不再用全量数据重训。默认输出：
 
 ```text
 Accuracy: xx.xx%
@@ -61,7 +61,7 @@ Model: D:\data_record\Haoyu_Xu\pure_MI_1\adfcnn_teacher.pt
 python teacher.py --data "D:\data_record\Haoyu_Xu\pure_MI_1\motor_imagery.h5" --output "D:\models\Haoyu_Xu_v2.pt" --verbose
 ```
 
-模型文件含 CPU 权重、网络配置、完整预处理参数、通道/类别约定、最佳 epoch、val/test Accuracy、划分 seed、各组 trial ID 和软件版本。`Predictor` 使用这些信息恢复推理流程，加载时不依赖训练 H5、原始数据路径或训练机器的 GPU 编号。文件中的 Accuracy 均以 `[0, 1]` 小数保存。
+模型文件含 CPU 权重、网络配置、完整预处理参数、通道/类别约定、最佳 epoch、val/test Accuracy、划分 seed、实际参与 train/val/test 的 trial ID、平衡前后类别计数、被欠采样排除的 trial ID 和软件版本。`Predictor` 使用这些信息恢复推理流程，加载时不依赖训练 H5、原始数据路径或训练机器的 GPU 编号。文件中的 Accuracy 均以 `[0, 1]` 小数保存。
 
 ## reasoning：原始 3 秒窗口分类
 
@@ -116,6 +116,7 @@ H5 必须包含 `metadata/json`、`protocol/json`、`eeg/raw_uv`、`trials/table
 4. 每个窗口、每个通道独立标准化：`(x - mean) / max(std, 1e-4)`，std 使用 `ddof=0`，输出 float32 `(1, 8, 750)`。不跨 trial 计算均值/方差，不在全部数据上拟合 scaler。
 5. ADFCNN 保留参考实现的双分支和注意力计算：8 个特征，dropout 0.25，卷积 max norm 2.0；两路池化合计 51 个位置，分类器输出两类 log-softmax。
 6. 训练 300 epochs，batch size 16，Adam，学习率 0.001，weight decay 0.075；CosineAnnealingLR，`T_max=epochs`、`eta_min=0`，CrossEntropyLoss。选择 validation accuracy 最大的模型，accuracy 相同时选 validation loss 更低者；完全相同则保留较早 epoch。test 只在模型选择后评估一次。
+7. `teacher.py` 显式设置 `balance_train_validation=True`。分层五折后，在 train 和 val 内分别按训练 seed 随机打乱两类索引，再各取该集合中的较小类别数量。欠采样只移除多数类、不复制少数类；训练 DataLoader 仍在每个 epoch 继续 shuffle。test 不欠采样，其 Accuracy 反映原始测试分布。`results.py` 显式设为 `False`，不改变现有基准。
 
 旧 inner-session 代码曾使用 751 点窗口，并存在连续 block 滤波路径。本实现按照本次确认使用 750 点和窗口独立滤波，因此保证训练与实时窗口推理一致；其结果不应被视为旧预处理结果的逐数值复现。
 

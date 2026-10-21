@@ -5,7 +5,8 @@ import sys
 # results 不生成 Python 字节码缓存或实验文件。
 sys.dont_write_bytecode = True
 from adfcnn_lib.cli import (
-    add_training_arguments, describe_session, epoch_reporter, run_main, training_from_args,
+    add_training_arguments, describe_session, epoch_reporter, run_main,
+    training_from_args,
 )
 from adfcnn_lib.config import N_FOLDS, RESULTS_SEEDS, ModelConfig, PreprocessingConfig, TrainingConfig
 from adfcnn_lib.data import load_session, make_folds
@@ -14,7 +15,7 @@ from adfcnn_lib.training import train_fold
 # 参数配置区：每个入口显式指定实验参数，可直接在此修改。
 TRAINING = TrainingConfig(
     epochs=300, batch_size=16, learning_rate=0.001, weight_decay=0.075,
-    device="cuda:0", num_workers=0,
+    device="cuda:0", num_workers=0, balance_train_validation=False,
 )
 PREPROCESSING = PreprocessingConfig(lowpass_hz=40.0, standardization_std_floor=1e-4)
 MODEL = ModelConfig(features=8, dropout=0.25, convolution_max_norm=2.0, log_floor=1e-6)

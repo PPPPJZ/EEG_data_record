@@ -77,10 +77,13 @@ class TrainingConfig:
     weight_decay: float = 0.075
     device: str = "cuda:0"
     num_workers: int = 0
+    balance_train_validation: bool = False
 
     def __post_init__(self) -> None:
         if self.epochs < 1 or self.batch_size < 1 or self.num_workers < 0:
             raise ValueError("epochs/batch_size 必须为正整数，num_workers 不能为负")
+        if not isinstance(self.balance_train_validation, bool):
+            raise ValueError("balance_train_validation 必须为布尔值")
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
             raise ValueError("learning_rate 必须为正数")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
