@@ -5,10 +5,9 @@ import math
 
 # 不使用采集文件内的随机种子。读取 shuffle 和实验划分互不依赖。
 LOAD_SHUFFLE_SEED = 42
-RESULTS_SEEDS = (42, 2024, 3407)
+RESULTS_SEED = 42
 TEACHER_SEED = 42
 N_FOLDS = 5
-TEACHER_TEST_FOLD = 1
 TEACHER_FILENAME = "adfcnn_teacher.pt"
 CHECKPOINT_VERSION = 1
 MODEL_VERSION = "adfcnn_750_v1"
@@ -71,19 +70,16 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    epochs: int = 300
+    epochs: int = 2000
     batch_size: int = 16
     learning_rate: float = 1e-3
     weight_decay: float = 0.075
     device: str = "cuda:0"
     num_workers: int = 0
-    balance_train_validation: bool = False
 
     def __post_init__(self) -> None:
         if self.epochs < 1 or self.batch_size < 1 or self.num_workers < 0:
             raise ValueError("epochs/batch_size 必须为正整数，num_workers 不能为负")
-        if not isinstance(self.balance_train_validation, bool):
-            raise ValueError("balance_train_validation 必须为布尔值")
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
             raise ValueError("learning_rate 必须为正数")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:

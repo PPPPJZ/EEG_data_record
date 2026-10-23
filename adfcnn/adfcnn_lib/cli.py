@@ -20,7 +20,6 @@ def training_from_args(args: argparse.Namespace, defaults: TrainingConfig) -> Tr
         epochs=args.epochs, batch_size=args.batch_size,
         learning_rate=defaults.learning_rate, weight_decay=defaults.weight_decay,
         device=args.device, num_workers=defaults.num_workers,
-        balance_train_validation=defaults.balance_train_validation,
     )
 
 
@@ -29,24 +28,11 @@ def describe_session(session: SessionData) -> None:
     print(f"Trials: {session.summary}", file=sys.stderr, flush=True)
 
 
-def describe_balance(label: str, summary: dict) -> None:
-    print(
-        f"{label} class_balance: "
-        f"train {summary['train_original_class_counts']} -> "
-        f"{summary['train_balanced_class_counts']}; "
-        f"val {summary['validation_original_class_counts']} -> "
-        f"{summary['validation_balanced_class_counts']}; "
-        f"test {summary['test_class_counts']} unchanged",
-        file=sys.stderr,
-        flush=True,
-    )
-
-
 def epoch_reporter(label: str, epochs: int) -> Callable[[int, float, float], None]:
-    def report(epoch: int, accuracy: float, loss: float) -> None:
+    def report(epoch: int, loss: float, learning_rate: float) -> None:
         if epoch == 1 or epoch % 25 == 0 or epoch == epochs:
             print(
-                f"{label} epoch={epoch}/{epochs} val_accuracy={accuracy:.4f} val_loss={loss:.4f}",
+                f"{label} epoch={epoch}/{epochs} train_loss={loss:.6f} lr={learning_rate:.8g}",
                 file=sys.stderr, flush=True,
             )
     return report

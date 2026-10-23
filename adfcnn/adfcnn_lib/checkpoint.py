@@ -12,42 +12,24 @@ import torch
 import h5py
 from .config import (
     CHECKPOINT_VERSION, MODEL_VERSION, PREPROCESSING_VERSION,
-    N_FOLDS, ModelConfig, TrainingConfig,
+    ModelConfig, TrainingConfig,
 )
-from .data import SessionData, split_fold_indices
-from .training import FoldResult
+from .data import SessionData
+from .training import TrainingResult
 
 
 def save_teacher(
-    destination: str | Path, session: SessionData, result: FoldResult,
-    fold_ids: np.ndarray, test_fold: int, split_seed: int,
+    destination: str | Path, session: SessionData, result: TrainingResult,
     training: TrainingConfig, model_config: ModelConfig,
 ) -> Path:
     path = Path(destination).expanduser().resolve()
-    if len(fold_ids) != len(session.labels):
-        raise ValueError("fold_ids 与 trial 数量不一致")
+    if path == session.source_path.resolve():
+        raise ValueError("模型输出路径不可与输入 H5 相同")
     train = result.train_indices
-    validation = result.validation_indices
-    test = result.test_indices
-    original_train, original_validation, original_test = split_fold_indices(
-        fold_ids, test_fold
-    )
-    if (
-        not set(train).issubset(original_train)
-        or not set(validation).issubset(original_validation)
-        or not np.array_equal(np.sort(test), original_test)
-    ):
-        raise ValueError("训练结果的平衡划分与 fold_ids 不一致")
-    class_balance = {
-        key: value for key, value in result.class_balance.items()
-        if key not in {"dropped_train_indices", "dropped_validation_indices"}
-    }
-    class_balance["dropped_train_trial_ids"] = session.trial_ids[
-        result.class_balance["dropped_train_indices"]
-    ].tolist()
-    class_balance["dropped_validation_trial_ids"] = session.trial_ids[
-        result.class_balance["dropped_validation_indices"]
-    ].tolist()
+    if not np.array_equal(np.sort(train), np.arange(len(session.labels))):
+        raise ValueError("teacher 必须使用全部有效带标签 trial 训练")
+    if result.final_epoch != training.epochs:
+        raise ValueError("teacher 必须完成全部配置 epochs")
     payload = {
         "checkpoint_version": CHECKPOINT_VERSION,
         "model_version": MODEL_VERSION,
@@ -59,18 +41,23 @@ def save_teacher(
         "source_path": str(session.source_path),
         "session_summary": session.summary,
         "training_config": asdict(training),
-        "split_seed": split_seed,
+        "training_protocol": {
+            "data": "all_usable_labeled_trials",
+            "validation": False,
+            "test": False,
+            "class_resampling": "none",
+            "checkpoint_selection": "final_epoch",
+            "optimizer": "Adam",
+            "scheduler": "CosineAnnealingLR",
+            "scheduler_T_max": training.epochs,
+            "scheduler_eta_min": 0.0,
+        },
         "training_seed": result.training_seed,
-        "test_fold": test_fold,
-        "validation_fold": test_fold % N_FOLDS + 1,
-        "class_balance": class_balance,
+        "train_class_counts": np.bincount(session.labels[train], minlength=2).tolist(),
         "train_trial_ids": session.trial_ids[train].tolist(),
-        "validation_trial_ids": session.trial_ids[validation].tolist(),
-        "test_trial_ids": session.trial_ids[test].tolist(),
-        "best_epoch": result.best_epoch,
-        "validation_accuracy": result.validation_accuracy,
-        "validation_loss": result.validation_loss,
-        "test_accuracy": result.test_accuracy,
+        "final_epoch": result.final_epoch,
+        "final_train_loss": result.final_train_loss,
+        "final_learning_rate": result.final_learning_rate,
         "software_versions": {
             module.__name__: str(module.__version__)
             for module in (torch, np, scipy, mne, h5py, sklearn)

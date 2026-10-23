@@ -1,4 +1,4 @@
-"""训练仅在内存中保留最佳验证模型，测试集在选择完成后评估一次。"""
+"""固定 epoch 训练：results 最后测试一次，teacher 使用全部数据且不评估。"""
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
@@ -7,25 +7,26 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from .config import ModelConfig, TrainingConfig
-from .data import (
-    SessionData, balanced_train_validation_split, split_fold_indices,
-)
+from .data import SessionData, split_four_train_one_test, validate_balanced_folds
 from .model import ADFCNN
 from .runtime import resolve_device, set_seed
 
 
 @dataclass(frozen=True)
-class FoldResult:
+class TrainingResult:
     state_dict: dict[str, torch.Tensor]
-    best_epoch: int
-    validation_accuracy: float
-    validation_loss: float
-    test_accuracy: float
+    final_epoch: int
+    final_train_loss: float
+    final_learning_rate: float
     training_seed: int
     train_indices: np.ndarray
-    validation_indices: np.ndarray
+
+
+@dataclass(frozen=True)
+class FoldResult(TrainingResult):
+    test_accuracy: float
+    test_loss: float
     test_indices: np.ndarray
-    class_balance: dict
 
 
 def make_loader(
@@ -62,49 +63,17 @@ def evaluate(model: ADFCNN, loader: DataLoader, device: torch.device) -> tuple[f
     return loss, accuracy
 
 
-def train_fold(
-    session: SessionData, fold_ids: np.ndarray, test_fold: int, seed: int,
+def _train_final_model(
+    session: SessionData, train_indices: np.ndarray, seed: int,
     config: TrainingConfig, model_config: ModelConfig | None = None,
     progress: Callable[[int, float, float], None] | None = None,
-) -> FoldResult:
+) -> tuple[ADFCNN, TrainingResult]:
     architecture = ModelConfig() if model_config is None else model_config
-    if len(fold_ids) != len(session.labels):
-        raise ValueError("fold_ids 与 trial 数量不一致")
-    # 每折使用独立且确定的模型初始化；teacher 与 results 的第一折一致。
-    training_seed = seed + test_fold - 1
-    if config.balance_train_validation:
-        (
-            train_indices,
-            validation_indices,
-            test_indices,
-            class_balance,
-        ) = balanced_train_validation_split(
-            fold_ids, session.labels, test_fold, training_seed
-        )
-    else:
-        train_indices, validation_indices, test_indices = split_fold_indices(
-            fold_ids, test_fold
-        )
-
-        def counts(indices: np.ndarray) -> list[int]:
-            return np.bincount(
-                session.labels[indices], minlength=2
-            ).astype(int).tolist()
-
-        class_balance = {
-            "method": "none",
-            "train_original_class_counts": counts(train_indices),
-            "train_balanced_class_counts": counts(train_indices),
-            "validation_original_class_counts": counts(validation_indices),
-            "validation_balanced_class_counts": counts(validation_indices),
-            "test_class_counts": counts(test_indices),
-            "dropped_train_indices": [],
-            "dropped_validation_indices": [],
-        }
-    set_seed(training_seed)
+    if len(train_indices) == 0:
+        raise ValueError("训练集不可为空")
+    set_seed(seed)
     device = resolve_device(config.device)
-    train_loader = make_loader(session, train_indices, config, device, True, training_seed)
-    validation_loader = make_loader(session, validation_indices, config, device, False, training_seed)
+    train_loader = make_loader(session, train_indices, config, device, True, seed)
     model = ADFCNN(architecture).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
@@ -112,10 +81,10 @@ def train_fold(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=config.epochs, eta_min=0.0
     )
-    best_state, best_epoch = None, 0
-    best_accuracy, best_loss = -1.0, float("inf")
     for epoch in range(1, config.epochs + 1):
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         model.train()
+        loss_sum, count = 0.0, 0
         for inputs, labels in train_loader:
             inputs = inputs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -125,21 +94,48 @@ def train_fold(
                 raise RuntimeError(f"epoch {epoch} 训练 loss 非有限数值")
             loss.backward()
             optimizer.step()
+            loss_sum += float(loss.item()) * len(labels)
+            count += len(labels)
         scheduler.step()
-        validation_loss, validation_accuracy = evaluate(model, validation_loader, device)
-        if (validation_accuracy, -validation_loss) > (best_accuracy, -best_loss):
-            best_epoch, best_accuracy, best_loss = epoch, validation_accuracy, validation_loss
-            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+        train_loss = loss_sum / count
         if progress is not None:
-            progress(epoch, validation_accuracy, validation_loss)
-    if best_state is None:
-        raise RuntimeError("训练未选出有效模型")
-    model.load_state_dict(best_state, strict=True)
-    test_loader = make_loader(session, test_indices, config, device, False, training_seed)
-    _, test_accuracy = evaluate(model, test_loader, device)
-    return FoldResult(
-        state_dict=best_state, best_epoch=best_epoch, validation_accuracy=best_accuracy,
-        validation_loss=best_loss, test_accuracy=test_accuracy, training_seed=training_seed,
-        train_indices=train_indices, validation_indices=validation_indices,
-        test_indices=test_indices, class_balance=class_balance,
+            progress(epoch, train_loss, learning_rate)
+    result = TrainingResult(
+        state_dict={key: value.detach().cpu().clone() for key, value in model.state_dict().items()},
+        final_epoch=config.epochs, final_train_loss=train_loss,
+        final_learning_rate=float(optimizer.param_groups[0]["lr"]),
+        training_seed=seed, train_indices=train_indices,
     )
+    return model, result
+
+
+def train_fold(
+    session: SessionData, fold_ids: np.ndarray, test_fold: int, seed: int,
+    config: TrainingConfig, model_config: ModelConfig | None = None,
+    progress: Callable[[int, float, float], None] | None = None,
+) -> FoldResult:
+    """四折训练满全部 epoch，最终模型仅在 test 上评估一次。"""
+    validate_balanced_folds(session.labels, fold_ids)
+    train_indices, test_indices = split_four_train_one_test(fold_ids, test_fold)
+    # 与参考实验一致，每折均固定同一个 seed，不按 fold 编号偏移。
+    model, result = _train_final_model(session, train_indices, seed, config, model_config, progress)
+    device = next(model.parameters()).device
+    test_loader = make_loader(session, test_indices, config, device, False, seed)
+    test_loss, test_accuracy = evaluate(model, test_loader, device)
+    return FoldResult(
+        state_dict=result.state_dict, final_epoch=result.final_epoch,
+        final_train_loss=result.final_train_loss, final_learning_rate=result.final_learning_rate,
+        training_seed=result.training_seed, train_indices=result.train_indices,
+        test_accuracy=test_accuracy, test_loss=test_loss, test_indices=test_indices,
+    )
+
+
+def train_all(
+    session: SessionData, seed: int, config: TrainingConfig,
+    model_config: ModelConfig | None = None,
+    progress: Callable[[int, float, float], None] | None = None,
+) -> TrainingResult:
+    """全部有效带标签 trial 参与训练，不划分、不欠采样、不评估。"""
+    indices = np.arange(len(session.labels), dtype=np.int64)
+    _, result = _train_final_model(session, indices, seed, config, model_config, progress)
+    return result
