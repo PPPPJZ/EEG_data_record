@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ import numpy as np
 
 from app import ApplicationService, SessionForm
 from config import (
+    EEGStreamConfig,
     EVENT_RECORDING_START, EVENT_TRIAL_START, EVENT_CUE_LEFT, EVENT_CUE_RIGHT,
     EVENT_CUE_END, EVENT_TRIAL_END, EVENT_RECORDING_ABORTED,
     EVENT_BREAK_INSTRUCTION_START, EVENT_BREAK_MONITOR_START, EVENT_BREAK_END,
@@ -28,14 +30,15 @@ TIME_SCALE = 0.05
 BLOCK_SIZE = 20
 
 
-def fixture(path: Path, *, completed=18, total=21, break_state="none"):
+def fixture(path: Path, *, completed=18, total=21, break_state="none", channels=8):
     config = create_session_config(
         subject_id="RESTART-TEST", experiment_date="2026-10-20", description="恢复原配置",
         left_trials=total // 2, right_trials=total - total // 2,
         output_dir=str(path), random_seed=71, break_every_trials=BLOCK_SIZE,
     )
     plans = build_trial_plans(build_trial_sequence(config), config.break_every_trials)
-    writer = SessionWriter(config, plans, demo=True, time_scale=TIME_SCALE)
+    stream = EEGStreamConfig(channels=channels)
+    writer = SessionWriter(config, plans, demo=True, time_scale=TIME_SCALE, stream=stream)
     writer.begin_recording()
     writer.append_event(event_code=EVENT_RECORDING_START, trial_id=-1, class_id=-1,
                         planned_time_s=0, actual_time_s=0)
@@ -45,8 +48,8 @@ def fixture(path: Path, *, completed=18, total=21, break_state="none"):
         desired = round(t * 250)
         size = desired - writer.sample_count
         if size:
-            raw = np.full((8, size), plan.trial_id, np.float32)
-            writer.append_samples(raw, raw / 2)
+            raw = np.full((channels, size), plan.trial_id, np.float32)
+            writer.append_samples(raw)
         sample = writer.append_event(
             event_code=code, trial_id=plan.trial_id, class_id=plan.class_id,
             planned_time_s=t, actual_time_s=t, wall_time_s=t + wall_offset,
@@ -72,15 +75,15 @@ def fixture(path: Path, *, completed=18, total=21, break_state="none"):
     if break_state != "partial":
         plan = plans[completed]
         boundary(plan, "rest_start", EVENT_TRIAL_START, plan.planned_rest_start_s)
-        raw = np.full((8, 100), -999, np.float32)
-        writer.append_samples(raw, raw)
+        raw = np.full((channels, 100), -999, np.float32)
+        writer.append_samples(raw)
     duration = writer.sample_count / 250
     writer.append_event(event_code=EVENT_RECORDING_ABORTED, trial_id=completed + 1, class_id=-1,
                         planned_time_s=duration, actual_time_s=duration, wall_time_s=duration + wall_offset)
     quality = writer.finalize(status="incomplete", actual_duration_s=duration,
                               wall_duration_s=duration + wall_offset, malformed_packets_at_end=0,
                               reason="fixture disconnect")
-    write_session_readme(config, plans, status="incomplete", quality=quality)
+    write_session_readme(config, plans, status="incomplete", quality=quality, stream=stream)
     return path / "motor_imagery.h5"
 
 
@@ -89,6 +92,49 @@ def digest(path):
 
 
 class RestartStorageTest(unittest.TestCase):
+    def test_legacy_filtered_prefix_is_readable_but_never_extended(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = fixture(Path(temp) / "legacy", completed=1, total=2)
+            with h5py.File(path, "r+") as root:
+                root.attrs["schema_version"] = "1.3"
+                protocol = json.loads(root["protocol/json"][()])
+                protocol.pop("acquisition")
+                protocol.pop("saved_signals")
+                root["protocol/json"][()] = json.dumps(protocol)
+                root["eeg"].create_dataset(
+                    "filtered_uv", data=root["eeg/raw_uv"][:] / 2,
+                    maxshape=(None, 8), chunks=(250, 8),
+                )
+            info = parse_resume_path(str(path))
+            info.check_stream(EEGStreamConfig(channels=8), demo=True)
+            before = load_session(path)["filtered_uv"].copy()
+            writer = SessionWriter.resume(info)
+            writer.append_samples(np.full((8, 300), 777.0))
+            writer.finalize(status="incomplete", actual_duration_s=9.2, malformed_packets_at_end=0)
+            after = load_session(path)
+            np.testing.assert_array_equal(after["filtered_uv"], before[:2000])
+            self.assertEqual(len(after["raw_uv"]), 2300)
+            self.assertEqual(after["protocol"]["legacy_filtered_samples"], 2000)
+            parse_resume_path(str(path))  # 再次续采也允许短于 raw 的历史前缀。
+            with self.assertRaisesRegex(ValueError, "采集源"):
+                info.check_stream(EEGStreamConfig(channels=8), demo=False)
+
+    def test_32_channel_resume_preserves_prefix_and_stream_compatibility(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = fixture(Path(temp) / "wide", completed=1, total=2, channels=32)
+            before = load_session(path)["raw_uv"]
+            info = parse_resume_path(str(path))
+            info.check_stream(EEGStreamConfig(channels=32), demo=True)
+            with self.assertRaisesRegex(ValueError, "通道"):
+                info.check_stream(EEGStreamConfig(channels=8), demo=True)
+            writer = SessionWriter.resume(info)
+            writer.append_samples(np.full((32, 250), 123.0))
+            writer.finalize(status="incomplete", actual_duration_s=9, malformed_packets_at_end=0)
+            after = load_session(path)
+            np.testing.assert_array_equal(after["raw_uv"][:2000], before[:2000])
+            self.assertEqual(after["raw_uv"].shape, (2250, 32))
+            self.assertIsNone(after["filtered_uv"])
+
     def test_saved_teacher_hash_checked_before_model_load(self):
         from self_learning.runtime import FeedbackRuntime
         with tempfile.TemporaryDirectory() as temp:
@@ -140,7 +186,7 @@ class RestartStorageTest(unittest.TestCase):
             writer.finalize(status="incomplete", actual_duration_s=144, malformed_packets_at_end=0)
             after = load_session(renamed)
             np.testing.assert_array_equal(before["raw_uv"][:36000], after["raw_uv"])
-            np.testing.assert_array_equal(before["filtered_uv"][:36000], after["filtered_uv"])
+            self.assertIsNone(after["filtered_uv"])
             self.assertEqual(before["trials"][:18].tobytes(), after["trials"][:18].tobytes())
             self.assertTrue(np.all(after["trials"]["rest_start_sample"][18:] == -1))
             self.assertTrue(np.isnan(after["trials"]["actual_rest_start_s"][18:]).all())
@@ -192,7 +238,7 @@ class RestartPipelineTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result["trials"]["completed"].all())
             self.assertEqual(original["trials"][:18].tobytes(), result["trials"][:18].tobytes())
             np.testing.assert_array_equal(original["raw_uv"][:36000], result["raw_uv"][:36000])
-            np.testing.assert_array_equal(original["filtered_uv"][:36000], result["filtered_uv"][:36000])
+            self.assertIsNone(result["filtered_uv"])
             np.testing.assert_array_equal(result["trials"]["class_id"], original["trials"]["class_id"])
             self.assertEqual(result["trials"][18]["rest_start_sample"], 36000)
             self.assertNotIn(EVENT_RECORDING_ABORTED, result["events"]["event_code"])

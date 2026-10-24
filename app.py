@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Motren_E 左右手运动想象实验采集服务。"""
+"""通过厂家 WebSocket 推流采集 EEG，沿用运动想象实验流程。"""
 
 from __future__ import annotations
 
@@ -23,6 +23,13 @@ from config import (
     BREAK_COUNTDOWN_SECONDS,
     BREAK_INSTRUCTION_SECONDS,
     CHANNEL_COUNT,
+    EEGStreamConfig,
+    EEG_WS_HOST,
+    EEG_WS_PORT,
+    EEG_WS_CHANNELS,
+    EEG_WS_TIMEOUT_SECONDS,
+    TEACHER_CHANNELS,
+    SAMPLE_RATE_HZ,
     CLASS_NONE,
     DEFAULT_BREAK_EVERY_TRIALS,
     EVENT_BREAK_CHIME,
@@ -50,7 +57,8 @@ from config import (
     SELF_LEARNING_TRIAL_SECONDS,
     EVENT_SELF_LEARNING_START,
 )
-from eeg import BLEEEGSource, SimulatedEEGSource
+from eeg import SimulatedEEGSource
+from ws_eeg import WebSocketEEGSource
 from haptics import HapticCommand, HapticController
 from experiment import (
     SessionConfig,
@@ -103,12 +111,15 @@ class ApplicationService:
     def __init__(
         self, *, demo: bool = False, time_scale: float = 1.0,
         mock_teacher: bool = False, teacher_device: str = "cuda:0",
+        stream: EEGStreamConfig | None = None,
     ):
         if not math.isfinite(time_scale) or time_scale <= 0:
             raise ValueError("time_scale must be positive and finite")
         if not demo and time_scale != 1.0:
             raise ValueError("真实采集必须使用 time_scale=1")
         self.demo = demo
+        self.stream = stream or EEGStreamConfig(channels=CHANNEL_COUNT if demo else EEG_WS_CHANNELS)
+        self._teacher_indices: list[int] = []
         self.time_scale = time_scale
         if mock_teacher and not demo:
             raise ValueError("模拟 teacher 只能在 --demo 中启用")
@@ -132,7 +143,7 @@ class ApplicationService:
 
         self.device_status = "等待受试者信息"
         self.device_connected = False
-        self.source: BLEEEGSource | SimulatedEEGSource | None = None
+        self.source: WebSocketEEGSource | SimulatedEEGSource | None = None
         self._source_task: asyncio.Task | None = None
         self.haptics: HapticController | None = None
         self._scan_lock = asyncio.Lock()
@@ -188,18 +199,21 @@ class ApplicationService:
 
     async def _start_source(self) -> None:
         if self._source_task is not None and not self._source_task.done():
+            if isinstance(self.source, WebSocketEEGSource):
+                self._on_source_status(self.source.status, self.source.connected)
             return
         if self.demo:
             self.source = SimulatedEEGSource(
                 self._on_samples,
                 self._on_source_status,
                 time_scale=self.time_scale,
+                channels=self.stream.channels,
             )
         else:
-            self.source = BLEEEGSource(
+            self.source = WebSocketEEGSource(
                 self._on_samples,
                 self._on_source_status,
-                scan_lock=self._scan_lock,
+                config=self.stream,
             )
         self._source_task = asyncio.create_task(
             self.source.run(),
@@ -379,8 +393,8 @@ class ApplicationService:
             self._recording_active = False
             self._abort_scheduled = True
             asyncio.get_running_loop().create_task(
-                self.abort_experiment("正式采集期间蓝牙连接断开"),
-                name="abort-on-bluetooth-loss",
+                self.abort_experiment(f"正式采集期间 EEG 信号中断：{status}"),
+                name="abort-on-eeg-loss",
             )
 
     def _on_samples(
@@ -403,10 +417,11 @@ class ApplicationService:
 
         if self._recording_active and self.writer is not None:
             try:
-                self.writer.append_samples(raw_uv, filtered_uv)
+                self.writer.append_samples(raw_uv)
             except Exception as exc:  # noqa: BLE001 - 落盘失败必须终止实验
                 if not self._abort_scheduled:
                     self._abort_scheduled = True
+                    self._recording_active = False
                     asyncio.get_running_loop().create_task(
                         self.abort_experiment(f"数据写入失败：{exc}"),
                         name="abort-on-storage-error",
@@ -415,7 +430,8 @@ class ApplicationService:
         if self.feedback is not None and self.feedback.enabled:
             try:
                 self.feedback.append(
-                    raw_uv, self.writer.sample_count if self.writer else self.feedback.ring.total + raw_uv.shape[1]
+                    raw_uv[self._teacher_indices],
+                    self.writer.sample_count if self.writer else self.feedback.ring.total + raw_uv.shape[1]
                 )
             except ValueError as exc:
                 self._on_feedback_fault(str(exc))
@@ -436,10 +452,15 @@ class ApplicationService:
                 else form.dict()
             )
             config = create_session_config(**form_values, mock_teacher=self.mock_teacher)
+            teacher_indices = (
+                [i - 1 for i in self.stream.model_channels(demo=self.demo)]
+                if config.self_learning_enabled else []
+            )
             ensure_empty_output_dir(config.output_dir)
             await self._stop_haptics()
             await self._stop_feedback()
             self.config = config
+            self._teacher_indices = teacher_indices
             self._resume_info = None
             self._parsed_resume = None
             self._start_trial_index = 0
@@ -486,6 +507,7 @@ class ApplicationService:
             self._parsed_resume = None
             info = parse_resume_path(path)
             info.check_runtime(demo=self.demo, time_scale=self.time_scale, mock_teacher=self.mock_teacher)
+            info.check_stream(self.stream, demo=self.demo)
             self._parsed_resume = info
             return info.payload()
 
@@ -497,10 +519,15 @@ class ApplicationService:
                 raise ValueError("请先解析文件")
             info = self._parsed_resume
             info.check_unchanged()
+            info.check_stream(self.stream, demo=self.demo)
             await self._stop_haptics()
             await self._stop_feedback()
             await self._stop_source()
             self.config, self.plans = info.config, info.plans
+            self._teacher_indices = (
+                [i - 1 for i in self.stream.model_channels(demo=self.demo)]
+                if info.config.self_learning_enabled else []
+            )
             self.sequence = [p.class_id for p in info.plans]
             self._resume_info = info
             self._start_trial_index = info.cut.completed
@@ -585,8 +612,9 @@ class ApplicationService:
                         demo=self.demo,
                         time_scale=self.time_scale,
                         feedback_metadata=self.feedback.state_payload() if self.feedback else None,
+                        stream=self.stream,
                     )
-                    write_session_readme(self.config, self.plans, status="preparing")
+                    write_session_readme(self.config, self.plans, status="preparing", stream=self.stream)
             except Exception:
                 if self.writer is not None:
                     self.writer.discard_before_recording()
@@ -985,7 +1013,7 @@ class ApplicationService:
                 self._task_started_wall = None
                 self._abort_scheduled = False
                 try:
-                    write_session_readme(self.config, self.plans, status="complete", quality=quality)
+                    write_session_readme(self.config, self.plans, status="complete", quality=quality, stream=self.stream)
                 except Exception as exc:
                     # H5 已成功关闭；文档失败不能再尝试向已关闭的文件写 abort。
                     self.last_message = f"H5 已 complete，但 README 更新失败：{exc}"
@@ -1061,6 +1089,7 @@ class ApplicationService:
                         write_session_readme(
                             self.config, self.plans, status="incomplete",
                             quality=quality, termination_reason=reason,
+                            stream=self.stream,
                         )
                     except Exception as exc:
                         readme_error = f"；README 更新失败：{exc}"
@@ -1131,6 +1160,12 @@ class ApplicationService:
             "configured": config is not None,
             "device_status": self.device_status,
             "device_connected": self.device_connected,
+            "eeg": {
+                "channels": self.stream.channels,
+                "channel_labels": list(self.stream.channel_labels),
+                "sample_rate_hz": SAMPLE_RATE_HZ,
+                **self.stream.metadata(demo=self.demo),
+            },
             "malformed_packets": self._malformed_packets(),
             "session_locked": self.session_locked,
             "can_start": (
@@ -1274,7 +1309,7 @@ class ApplicationService:
             await self.broadcast(
                 {
                     "type": "samples",
-                    "channels": CHANNEL_COUNT,
+                    "channels": self.stream.channels,
                     "samples": np.round(samples, 3).tolist(),
                 }
             )
@@ -1289,9 +1324,11 @@ class ApplicationService:
 def create_app(
     *, demo: bool = False, time_scale: float = 1.0, mock_teacher: bool = False,
     teacher_device: str = "cuda:0",
+    stream: EEGStreamConfig | None = None,
 ) -> FastAPI:
     service = ApplicationService(
         demo=demo, time_scale=time_scale, mock_teacher=mock_teacher, teacher_device=teacher_device,
+        stream=stream,
     )
 
     @asynccontextmanager
@@ -1436,6 +1473,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--eeg-ws-host", default=EEG_WS_HOST, help="厂家推流监听地址")
+    parser.add_argument("--eeg-ws-port", type=int, default=EEG_WS_PORT, help="厂家推流监听端口，与网页端口独立")
+    parser.add_argument("--eeg-channels", type=int, default=None, help="全部采集通道数，真实默认 32，演示默认 8")
+    parser.add_argument("--eeg-timeout", type=float, default=EEG_WS_TIMEOUT_SECONDS, help="有效 EEG 断流超时秒数")
+    parser.add_argument("--teacher-channels", default=None, help="按模型电极顺序指定 8 个采集通道号（从 1 开始，逗号分隔）")
     parser.add_argument("--teacher-device", default="cuda:0", help="Teacher: cuda:0 / cpu")
     parser.add_argument("--mock-teacher", action="store_true", help="仅 --demo：模拟左右概率")
     parser.add_argument(
@@ -1454,12 +1496,27 @@ def main() -> None:
         parser.error("--time-scale 只能与 --demo 一起使用")
     if args.mock_teacher and not args.demo:
         parser.error("--mock-teacher 只能与 --demo 一起使用")
+    try:
+        stream = EEGStreamConfig(
+            host=args.eeg_ws_host, port=args.eeg_ws_port,
+            channels=args.eeg_channels if args.eeg_channels is not None else (CHANNEL_COUNT if args.demo else EEG_WS_CHANNELS),
+            timeout_seconds=args.eeg_timeout,
+            teacher_channels=(
+                tuple(int(i.strip()) for i in args.teacher_channels.split(","))
+                if args.teacher_channels is not None else TEACHER_CHANNELS
+            ),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not args.demo and args.port == args.eeg_ws_port:
+        parser.error("网页与 EEG 推流须使用不同端口")
 
     logging.getLogger("bleak").setLevel(logging.WARNING)
     uvicorn.run(
         create_app(
             demo=args.demo, time_scale=args.time_scale,
             mock_teacher=args.mock_teacher, teacher_device=args.teacher_device,
+            stream=stream,
         ),
         host=args.host,
         port=args.port,

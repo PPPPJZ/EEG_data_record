@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import Final
 
-# EEG 设备与数据格式
+# 新 EEG：本程序作为服务器，厂家程序向此地址推送 eeg_data。
+EEG_WS_HOST: Final = "127.0.0.1"
+EEG_WS_PORT: Final = 8765
+EEG_WS_CHANNELS: Final = 32
+EEG_WS_TIMEOUT_SECONDS: Final = 3.0
+EEG_WS_MAX_MESSAGE_BYTES: Final = 8 * 1024 * 1024
+EEG_WS_MAX_CHUNK_SAMPLES: Final = 2500
+# 按 Teacher 训练时的电极顺序填写厂家通道号（从 1 开始），必须恰好 8 个。
+# 只影响模型输入；显示与保存始终保留全部采集通道。
+TEACHER_CHANNELS: Final = ()
+
+# 旧 BLE 解码参数，仅供历史协议工具与 8 通道演示使用。
 TARGET_DEVICE_NAME: Final = "Motren_E"
 EEG_DATA_UUID: Final = "fec26ec4-6d71-4442-9f81-55bc21d658d6"
 CONTROL_UUID: Final = "7812a8f6-515a-4698-8bdc-a751b65c8e2c"
@@ -113,5 +126,61 @@ RECONNECT_DELAY_SECONDS: Final = 2.0
 DATA_FILENAME: Final = "motor_imagery.h5"
 SESSION_README_FILENAME: Final = "README.md"
 HDF5_SCHEMA_NAME: Final = "motren_motor_imagery"
-HDF5_SCHEMA_VERSION: Final = "1.3"
+HDF5_SCHEMA_VERSION: Final = "1.4"
 HDF5_WRITE_BLOCK_SAMPLES: Final = SAMPLE_RATE_HZ
+
+
+@dataclass(frozen=True)
+class EEGStreamConfig:
+    """集中定义接收协议；不对厂家数值乘 ADC 系数或做重采样。"""
+
+    host: str = EEG_WS_HOST
+    port: int = EEG_WS_PORT
+    channels: int = EEG_WS_CHANNELS
+    channel_labels: tuple[str, ...] = ()
+    timeout_seconds: float = EEG_WS_TIMEOUT_SECONDS
+    teacher_channels: tuple[int, ...] = TEACHER_CHANNELS
+
+    def __post_init__(self) -> None:
+        if not self.host.strip() or not 0 <= self.port <= 65535:
+            raise ValueError("EEG WebSocket 地址或端口无效")
+        if type(self.channels) is not int or not 1 <= self.channels <= 256:
+            raise ValueError("EEG 通道数必须在 1–256 之间")
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ValueError("EEG 断流超时必须为有限正数")
+        labels = tuple(self.channel_labels) or tuple(f"CH{i + 1}" for i in range(self.channels))
+        if len(labels) != self.channels or len(set(labels)) != self.channels or not all(labels):
+            raise ValueError("EEG 通道标签必须与通道数一致且不重复")
+        object.__setattr__(self, "channel_labels", labels)
+        selected = tuple(self.teacher_channels)
+        if selected and (
+            len(selected) != 8 or len(set(selected)) != 8
+            or any(type(i) is not int or not 1 <= i <= self.channels for i in selected)
+        ):
+            raise ValueError("Teacher 通道映射须为 8 个不重复、从 1 开始的有效采集通道号")
+        object.__setattr__(self, "teacher_channels", selected)
+
+    def model_channels(self, *, demo: bool) -> tuple[int, ...]:
+        if self.teacher_channels:
+            return self.teacher_channels
+        if demo and self.channels == 8:
+            return tuple(range(1, 9))
+        raise ValueError(
+            "自主学习需先配置 TEACHER_CHANNELS 或 --teacher-channels："
+            "按 Teacher 训练电极顺序指定 8 个采集通道号，不能自动取前 8 通道"
+        )
+
+    def metadata(self, *, demo: bool) -> dict:
+        return {
+            "source": "simulated" if demo else "websocket",
+            "host": self.host,
+            "port": self.port,
+            "message_type": "eeg_data",
+            "input_layout": "channels,samples",
+            "input_unit": "uV",
+            "value_conversion": "none; float32 storage",
+            "timeout_seconds": self.timeout_seconds,
+            "teacher_channels": list(
+                self.teacher_channels or (tuple(range(1, 9)) if demo and self.channels == 8 else ())
+            ),
+        }

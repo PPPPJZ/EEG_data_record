@@ -10,10 +10,16 @@ python app.py
 
 浏览器打开 http://127.0.0.1:8000，选择 `self_learning`，填写受试者信息、
 学习 trial 总数（默认 100）、teacher `.pt` 文件的绝对路径及空的数据目录。
-本阶段只连接 Motren_E，不连接震动手环。默认 teacher 设备为 `cuda:0`；
+本阶段接收厂家 WebSocket EEG，不连接震动手环。默认 teacher 设备为 `cuda:0`；
 CPU 调试可用 `python app.py --teacher-device cpu`。
 
-设备检查页显示原有 8 通道波形。右上模型指示灯只有在 teacher 加载及预热成功
+真实自主学习必须先在根目录 `config.py` 设置 `TEACHER_CHANNELS`，
+或用 `--teacher-channels` 指定 8 个从 1 开始、逗号分隔的采集通道号。
+顺序必须对应 Teacher 训练的电极，不能自动取前 8 通道。配置只改变模型输入，
+原始 EEG 仍保存全部通道。映射写入 H5 `protocol/json` 的
+`acquisition.teacher_channels`，续采必须一致。
+
+设备检查页显示全部采集通道（默认 32，可滚动）。右上模型指示灯只有在 teacher 加载及预热成功
 后变绿；模型错误或无有效 EEG 信号时禁止开始。点击模型测试，会逐条处理
 10 个随机 `(750,8)` 原始微伏窗口，报告平均和最大耗时以及是否低于推理间隔。
 计时包含 40 Hz FIR、标准化、CPU/GPU 传输、ADFCNN、softmax 和返回概率；
@@ -32,7 +38,7 @@ CPU 调试可用 `python app.py --teacher-device cpu`。
 
 每次想象开始重置小球到 0.5，同时重置缓冲、EMA 和速度。推理不跨 trial，
 不拼接组间休息两侧的数据；过载时不堆积旧窗口。设备断连会终止正式 trial 并
-保留不完整数据；组间断连暂停，恢复后手动继续。Esc 中止实验。
+删除当前未完成 trial、保留完整 trial；组间断连暂停，恢复后手动继续。Esc 中止实验并保存已有数据。
 组间休息、波形显示及空目录保护沿用原流程。
 
 ADFCNN 沿用 `adfcnn.adfcnn_lib.inference.Predictor`。输入原始 `(750,8)` 微伏，
@@ -56,9 +62,14 @@ teacher 是固定反馈模型，没有在线更新。无 instruction 时，受�
 位置用高精度实际经过时间积分，限制在配置边界内。网页使用
 requestAnimationFrame 渲染，依据服务器位置和速度作短暂帧间外推，
 推理在线程中执行，不阻塞采集事件循环。固定 250 Hz、750 点和 ADFCNN 架构。
-Windows 不保证硬实时，系统负载和 BLE 包到达都会影响更新间隔。
+Windows 不保证硬实时，系统负载和厂家数据块到达都会影响更新间隔。
+反馈缓冲按块长度容忍正常的推送间隔，建议厂家使用短块推流；
+新数据尚未到达时不会重复推理同一窗口。WebSocket 断流检查见根目录 README。
 
-H5 继续保存 raw_uv、filtered_uv、events、trials 和 quality，schema 1.3。
+H5 保存全部通道的 raw_uv、events、trials 和 quality，schema 1.4。
+新文件不保存 filtered_uv；50 Hz 陷波和两级 5–30 Hz 带通只用于内存中的波形显示。
+raw_uv 为厂家接收值的 float32 表示，不额外滤波或乘旧 ADC 系数，输入须为 uV。
+厂家上游是否滤波需在厂家程序中确认。
 self_learning 的 `trials/table.class_id=-1` 表示未知，不是模型预测标签；
 `cue_start_sample` 表示想象控制开始，`cue_end_sample` 与其相同（无箭头）。
 新增 `self_learning/config_json` 保存模型哈希、配置与测试结果，

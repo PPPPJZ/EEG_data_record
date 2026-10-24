@@ -170,10 +170,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             event_codes = set(session["events"]["event_code"].tolist())
             self.assertEqual(session["status"], "complete")
             self.assertEqual(session["raw_uv"].shape[1], 8)
-            self.assertEqual(
-                session["raw_uv"].shape,
-                session["filtered_uv"].shape,
-            )
+            self.assertIsNone(session["filtered_uv"])
             self.assertGreater(session["raw_uv"].shape[0], 1_700)
             self.assertLess(session["raw_uv"].shape[0], 2_300)
             self.assertIn(EVENT_RECORDING_START, event_codes)

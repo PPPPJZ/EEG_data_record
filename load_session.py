@@ -39,7 +39,7 @@ def load_session(path: str | Path) -> dict[str, Any]:
             "metadata": _read_json_dataset(handle["metadata/json"]),
             "protocol": _read_json_dataset(handle["protocol/json"]),
             "raw_uv": handle["eeg/raw_uv"][:],
-            "filtered_uv": handle["eeg/filtered_uv"][:],
+            "filtered_uv": handle["eeg/filtered_uv"][:] if "eeg/filtered_uv" in handle else None,
             "events": handle["events/table"][:],
             "trials": handle["trials/table"][:],
             "haptic_commands": (
@@ -65,13 +65,15 @@ def extract_trial(
     session: dict[str, Any],
     trial_id: int,
     *,
-    signal: str = "filtered_uv",
+    signal: str = "raw_uv",
     window: str = "whole_trial",
 ) -> np.ndarray:
     """按 HDF5 中的实际边界提取一个 trial，返回 [samples, channels]。"""
 
     if signal not in {"raw_uv", "filtered_uv"}:
         raise ValueError("signal must be raw_uv or filtered_uv")
+    if session.get(signal) is None:
+        raise ValueError(f"本文件未保存 {signal}，请使用 raw_uv")
     boundary_fields = {
         "whole_trial": ("rest_start_sample", "trial_end_sample"),
         "motor_imagery": ("cue_start_sample", "trial_end_sample"),
@@ -91,6 +93,8 @@ def extract_trial(
     end = int(row[end_field])
     if start < 0 or end < 0:
         raise ValueError(f"trial {trial_id} is incomplete for window {window}")
+    if end > len(session[signal]):
+        raise ValueError(f"{signal} 未覆盖此 trial；旧滤波数据只保留历史前缀，请使用 raw_uv")
     return session[signal][start:end]
 
 

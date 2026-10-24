@@ -437,8 +437,9 @@ textarea:focus-visible {
 
 .waveform-area {
   min-height: 540px;
+  max-height: 75vh;
   padding: 10px 20px 8px;
-  overflow: hidden;
+  overflow: auto;
   background: #f8fafb;
 }
 

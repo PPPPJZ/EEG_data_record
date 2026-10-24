@@ -249,7 +249,7 @@ class BLEEEGSource:
 
 
 class SimulatedEEGSource:
-    """用于无设备端到端测试的 8 通道模拟源。"""
+    """用于无设备端到端测试的可配置通道模拟源。"""
 
     def __init__(
         self,
@@ -258,22 +258,24 @@ class SimulatedEEGSource:
         *,
         time_scale: float = 1.0,
         seed: int = 7,
+        channels: int = CHANNEL_COUNT,
     ) -> None:
         self.on_samples = on_samples
         self.on_status = on_status
         self.time_scale = time_scale
+        self.channels = channels
         self.running = True
-        self.filter = RealtimeEEGFilter()
+        self.filter = RealtimeEEGFilter(channels=channels)
         self.rng = np.random.default_rng(seed)
         self.sample_index = 0
-        self.phases = np.linspace(0.0, np.pi, CHANNEL_COUNT, endpoint=False)
+        self.phases = np.linspace(0.0, np.pi, channels, endpoint=False)
         self.malformed_packets = 0
 
     def stop(self) -> None:
         self.running = False
 
     async def run(self) -> None:
-        self.on_status("已连接模拟 Motren_E", True)
+        self.on_status(f"已连接模拟 EEG · {self.channels} 通道", True)
         loop = asyncio.get_running_loop()
         last_update = loop.time()
         sample_budget = 0.0
@@ -294,8 +296,8 @@ class SimulatedEEGSource:
 
             indices = np.arange(self.sample_index, self.sample_index + chunk_size)
             time_seconds = indices / SAMPLE_RATE_HZ
-            raw_uv = np.empty((CHANNEL_COUNT, chunk_size), dtype=np.float64)
-            for channel in range(CHANNEL_COUNT):
+            raw_uv = np.empty((self.channels, chunk_size), dtype=np.float64)
+            for channel in range(self.channels):
                 phase = self.phases[channel]
                 mu = (14.0 + channel) * np.sin(
                     2 * np.pi * (10.0 + channel * 0.07) * time_seconds + phase

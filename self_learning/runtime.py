@@ -14,6 +14,10 @@ import numpy as np
 
 from .control import ControlConfig, CursorController, RawRingBuffer, WINDOW_SAMPLES
 
+SAMPLE_RATE_HZ = 250
+MIN_SIGNAL_TIMEOUT_SECONDS = 0.25
+CHUNK_INTERVAL_TOLERANCE = 1.5
+
 
 class MockPredictor:
     """只供显式 --demo --mock-teacher 使用，周期性左右概率。"""
@@ -57,6 +61,7 @@ class FeedbackRuntime:
         self.trial_id = -1
         self.sample_end = 0
         self.last_sample_time = None
+        self.signal_timeout_seconds = MIN_SIGNAL_TIMEOUT_SECONDS
         self.control_started_at = None
         self.last_inferred_total = -1
         self.prediction_count = 0
@@ -138,6 +143,7 @@ class FeedbackRuntime:
         self.last_prediction = None
         self.last_inferred_total = -1
         self.last_sample_time = None
+        self.signal_timeout_seconds = MIN_SIGNAL_TIMEOUT_SECONDS
         self.prediction_count = 0
         self.trial_id = trial_id
         self.context = context
@@ -152,13 +158,19 @@ class FeedbackRuntime:
         if not self.enabled:
             return
         now = time.perf_counter()
+        # 厂家按块推送：不能把正常的 250 点/秒分块误判为 BLE 断流。
+        timeout = max(
+            MIN_SIGNAL_TIMEOUT_SECONDS,
+            raw_uv.shape[1] / SAMPLE_RATE_HZ * self.time_scale * CHUNK_INTERVAL_TOLERANCE,
+        )
         # 信号中断后重新积累完整窗口，不继续使用断点两侧的数据。
-        if self.last_sample_time is not None and now - self.last_sample_time > 0.25:
+        if self.last_sample_time is not None and now - self.last_sample_time > max(timeout, self.signal_timeout_seconds):
             self.generation += 1
             self.ring.reset()
             self.last_inferred_total = -1
             self.cursor.freeze(now / self.time_scale)
         self.ring.append(raw_uv)
+        self.signal_timeout_seconds = timeout
         self.last_sample_time = now
         self.sample_end = sample_end
 
@@ -215,7 +227,7 @@ class FeedbackRuntime:
             if not self.ready or not self.enabled or self.busy:
                 continue
             now = time.perf_counter()
-            if self.last_sample_time is None or now - self.last_sample_time > 0.25:
+            if self.last_sample_time is None or now - self.last_sample_time > self.signal_timeout_seconds:
                 self.cursor.freeze(now / self.time_scale)
                 continue
             if self.last_inferred_total == self.ring.total:
@@ -231,7 +243,7 @@ class FeedbackRuntime:
                 if not self.enabled or generation != self.generation:
                     continue
                 now = time.perf_counter()
-                if now - self.last_sample_time > 0.25:
+                if now - self.last_sample_time > self.signal_timeout_seconds:
                     self.cursor.freeze(now / self.time_scale)
                     continue
                 p = float(result.probabilities[1])
@@ -262,7 +274,7 @@ class FeedbackRuntime:
     def state_payload(self):
         now = time.perf_counter()
         if self.enabled:
-            if self.last_sample_time is None or now - self.last_sample_time > 0.25:
+            if self.last_sample_time is None or now - self.last_sample_time > self.signal_timeout_seconds:
                 self.cursor.freeze(now / self.time_scale)
             else:
                 self.cursor.advance(now / self.time_scale)

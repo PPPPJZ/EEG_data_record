@@ -1,6 +1,7 @@
 "use strict";
 
-const CHANNEL_COUNT = 8;
+let channelCount = 8;
+let channelLabels = Array.from({ length: channelCount }, (_, i) => `CH${i + 1}`);
 const SAMPLE_RATE = 250;
 const PREVIEW_SECONDS = 5;
 const PREVIEW_POINTS = SAMPLE_RATE * PREVIEW_SECONDS;
@@ -74,7 +75,7 @@ const hapticTestButton = document.getElementById("hapticTestButton");
 const hapticPanel = document.getElementById("hapticPanel");
 const hapticMessage = document.getElementById("hapticMessage");
 
-const previewData = Array.from({ length: CHANNEL_COUNT }, () => []);
+let previewData = Array.from({ length: channelCount }, () => []);
 let socket = null;
 let latestState = null;
 let previewNeedsDraw = true;
@@ -467,6 +468,19 @@ document.addEventListener("keydown", async (event) => {
 
 function updateState(state) {
   latestState = state;
+  if (state.eeg) {
+    const eeg = state.eeg;
+    if (channelCount !== eeg.channels ||
+        channelLabels.join(",") !== eeg.channel_labels.join(",")) {
+      channelCount = eeg.channels;
+      channelLabels = eeg.channel_labels;
+      previewData = Array.from({ length: channelCount }, () => []);
+      waveformCanvas.style.minHeight = `${Math.max(520, channelCount * 64 + 36)}px`;
+      previewNeedsDraw = true;
+    }
+    document.getElementById("acquisitionInfo").textContent =
+      `${eeg.source === "simulated" ? "模拟 EEG" : "厂家 EEG"} · ${channelCount} channels · ${eeg.sample_rate_hz} Hz`;
+  }
   feedbackReceivedAt = performance.now();
   if (state.protocol_timing) {
     const timingChanged = !protocolTiming ||
@@ -669,9 +683,10 @@ function formatInteger(value) {
 }
 
 function appendPreview(channels) {
-  for (let channel = 0; channel < CHANNEL_COUNT; channel += 1) {
+  if (channels.length !== channelCount) return;
+  for (let channel = 0; channel < channelCount; channel += 1) {
     const target = previewData[channel];
-    target.push(...channels[channel]);
+    target.push(...channels[channel].slice(-PREVIEW_POINTS));
     if (target.length > PREVIEW_POINTS) {
       target.splice(0, target.length - PREVIEW_POINTS);
     }
@@ -716,11 +731,11 @@ function drawPreview() {
     const top = 8;
     const bottom = 28;
     const plotWidth = width - left - right;
-    const laneHeight = (height - top - bottom) / CHANNEL_COUNT;
+    const laneHeight = (height - top - bottom) / channelCount;
 
     context.font = "11px system-ui, sans-serif";
     context.textBaseline = "middle";
-    for (let channel = 0; channel < CHANNEL_COUNT; channel += 1) {
+    for (let channel = 0; channel < channelCount; channel += 1) {
       const laneTop = top + laneHeight * channel;
       const centerY = laneTop + laneHeight / 2;
 
@@ -734,7 +749,7 @@ function drawPreview() {
       context.stroke();
 
       context.fillStyle = "#53616a";
-      context.fillText(`CH${channel + 1}`, 8, centerY - 8);
+      context.fillText(channelLabels[channel], 8, centerY - 8);
       context.fillStyle = "#849098";
       context.fillText("uV", 14, centerY + 9);
 
@@ -746,7 +761,7 @@ function drawPreview() {
       context.beginPath();
       context.rect(left, laneTop, plotWidth, laneHeight);
       context.clip();
-      context.strokeStyle = COLORS[channel];
+      context.strokeStyle = COLORS[channel % COLORS.length];
       context.lineWidth = 1.15;
       context.beginPath();
       for (let index = 0; index < values.length; index += 1) {

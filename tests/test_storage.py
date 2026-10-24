@@ -9,6 +9,7 @@ import numpy as np
 
 from config import (
     CHANNEL_COUNT,
+    EEGStreamConfig,
     CLASS_LEFT,
     EVENT_CUE_END,
     EVENT_CUE_LEFT,
@@ -35,7 +36,8 @@ class SessionWriterTest(unittest.TestCase):
                 random_seed=9,
             )
             plans = build_trial_plans([CLASS_LEFT])
-            writer = SessionWriter(config, plans)
+            stream = EEGStreamConfig(channels=CHANNEL_COUNT)
+            writer = SessionWriter(config, plans, stream=stream)
             writer.begin_recording()
             writer.append_event(
                 event_code=EVENT_RECORDING_START,
@@ -61,8 +63,7 @@ class SessionWriterTest(unittest.TestCase):
             raw = np.arange(500 * CHANNEL_COUNT, dtype=np.float64).reshape(
                 CHANNEL_COUNT, 500
             )
-            filtered = raw * 0.5
-            writer.append_samples(raw[:, :250], filtered[:, :250])
+            writer.append_samples(raw[:, :250])
             cue_index = writer.append_event(
                 event_code=EVENT_CUE_LEFT,
                 trial_id=1,
@@ -76,7 +77,7 @@ class SessionWriterTest(unittest.TestCase):
                 actual_time_s=1.0,
                 sample_index=cue_index,
             )
-            writer.append_samples(raw[:, 250:], filtered[:, 250:])
+            writer.append_samples(raw[:, 250:])
             cue_end_index = writer.append_event(
                 event_code=EVENT_CUE_END,
                 trial_id=1,
@@ -113,6 +114,7 @@ class SessionWriterTest(unittest.TestCase):
                 plans,
                 status="complete",
                 quality=quality,
+                stream=stream,
             )
 
             session = load_session(output_dir / "motor_imagery.h5")
@@ -127,7 +129,9 @@ class SessionWriterTest(unittest.TestCase):
             self.assertEqual(session["status"], "complete")
             self.assertEqual(session["raw_uv"].shape, (500, CHANNEL_COUNT))
             np.testing.assert_allclose(session["raw_uv"], raw.T)
-            np.testing.assert_allclose(session["filtered_uv"], filtered.T)
+            self.assertIsNone(session["filtered_uv"])
+            with self.assertRaisesRegex(ValueError, "未保存"):
+                extract_trial(session, 1, signal="filtered_uv")
             self.assertEqual(len(session["trials"]), 1)
             self.assertTrue(bool(session["trials"][0]["completed"]))
             self.assertEqual(whole_trial.shape, (500, CHANNEL_COUNT))
@@ -137,6 +141,8 @@ class SessionWriterTest(unittest.TestCase):
                 self.assertIn("protocol/json", handle)
                 self.assertIn("events/table", handle)
                 self.assertIn("quality", handle)
+                self.assertNotIn("eeg/filtered_uv", handle)
+                self.assertEqual(handle.attrs["schema_version"], "1.4")
 
     def test_rejects_nonempty_output_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

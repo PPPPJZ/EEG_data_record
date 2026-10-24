@@ -54,12 +54,13 @@
 
 ## 信号与滤波
 
-- 设备：`Motren_E`
-- 通道：`CH1`–`CH8`
+- 数据源：厂家 WebSocket `eeg_data` 推流（模拟模式见 metadata/runtime）
+- 通道：{channel_labels}，共 {channel_count} 个，顺序与接收数据一致
 - 采样率：250 Hz
 - 物理单位：uV
-- `/eeg/raw_uv`：软件滤波前的原始微伏数据
-- `/eeg/filtered_uv`：50 Hz 陷波后，串联两次 5–30 Hz 四阶 Butterworth 带通
+- `/eeg/raw_uv`：接收到、未经本程序滤波的微伏数据；不乘旧设备 ADC 系数
+- 显示仍使用 50 Hz 陷波和两次 5–30 Hz 四阶 Butterworth 带通，滤波结果不保存
+- 原始值要求厂家以 uV 推送；上游是否预先滤波需在厂家程序确认
 - 实时显示范围：±50 uV，超出部分只在显示时裁剪，文件内数据不裁剪
 
 ## HDF5 数据结构
@@ -70,12 +71,14 @@
 |---|---|
 | `/metadata/json` | 受试者信息、随机种子、实验状态和最终质量信息 |
 | `/protocol/json` | 时序、采样率、通道、滤波和事件编码 |
-| `/eeg/raw_uv` | `[samples, 8]` 原始 EEG，float32 |
-| `/eeg/filtered_uv` | `[samples, 8]` 滤波 EEG，float32 |
+| `/eeg/raw_uv` | `[samples, {channel_count}]` 原始 EEG，float32 |
 | `/events/table` | 实际发生的事件、计划时间、实际时间及采样点 |
 | `/trials/table` | 完整随机序列、`block_id` 及每个 trial 的直接切片边界 |
 | `/haptics/commands` | 震动命令、返回时间和样本索引；pure_MI 中为空 |
 | `/quality` | 样本覆盖率、时间偏差、异常包和终止信息 |
+
+新文件不创建 `/eeg/filtered_uv`。若续采历史模拟文件，其已有滤波前缀可保留，
+但不会新增滤波采样；前缀长度记录于协议的 `legacy_filtered_samples`。
 
 类别编码：
 
@@ -129,7 +132,7 @@
 
 ```python
 cue_index = int(trial["cue_start_sample"])
-segment = filtered_uv[cue_index:cue_index + int(t_seconds * 250)]
+segment = raw_uv[cue_index:cue_index + int(t_seconds * 250)]
 ```
 
 ## 质量汇总
@@ -160,7 +163,6 @@ from load_session import load_session
 
 session = load_session("/absolute/path/to/motor_imagery.h5")
 raw_uv = session["raw_uv"]
-filtered_uv = session["filtered_uv"]
 events = session["events"]
 trials = session["trials"]
 metadata = session["metadata"]

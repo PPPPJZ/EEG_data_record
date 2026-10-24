@@ -234,7 +234,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 session["protocol"]["trial_seconds"],
                 SELF_LEARNING_TRIAL_SECONDS,
             )
-            self.assertEqual(session["raw_uv"].shape, session["filtered_uv"].shape)
+            self.assertIsNone(session["filtered_uv"])
             codes = session["events"]["event_code"].tolist()
             self.assertEqual(codes.count(EVENT_SELF_LEARNING_START), 2)
             self.assertNotIn(EVENT_CUE_LEFT, codes)

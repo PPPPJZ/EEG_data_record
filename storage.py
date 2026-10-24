@@ -11,13 +11,11 @@ import h5py
 import numpy as np
 
 from config import (
-    ADC_UV_PER_LSB,
     BANDPASS_CASCADE_COUNT,
     BANDPASS_HIGH_HZ,
     BANDPASS_LOW_HZ,
     BANDPASS_ORDER,
-    CHANNEL_COUNT,
-    CHANNEL_LABELS,
+    EEGStreamConfig,
     CLASS_NAMES,
     DATA_FILENAME,
     DISPLAY_LIMIT_UV,
@@ -124,7 +122,10 @@ class SessionWriter:
         demo: bool = False,
         time_scale: float = 1.0,
         feedback_metadata: dict | None = None,
+        stream: EEGStreamConfig | None = None,
     ) -> None:
+        self.stream = stream or EEGStreamConfig()
+        self.channels = self.stream.channels
         ensure_empty_output_dir(config.output_dir)
         self.config = config
         self.plans = plans
@@ -136,7 +137,6 @@ class SessionWriter:
         self._event_count = 0
         self._flushed_sample_count = 0
         self._raw_pending: list[np.ndarray] = []
-        self._filtered_pending: list[np.ndarray] = []
         self._pending_sample_count = 0
         self._runtime = {"demo": demo, "time_scale": time_scale}
         self._feedback_metadata = feedback_metadata
@@ -164,13 +164,15 @@ class SessionWriter:
             if k not in {"status", "quality", "termination_reason", "ended_at_utc"}
         }
         self._feedback_metadata = info.feedback
-        self._raw_pending, self._filtered_pending = [], []
+        self._raw_pending = []
         self._pending_sample_count = 0
         self._file = h5py.File(self.path, "r+")
         try:
             self._metadata_dataset = self._file["metadata/json"]
             self._raw_dataset = self._file["eeg/raw_uv"]
-            self._filtered_dataset = self._file["eeg/filtered_uv"]
+            self.channels = self._raw_dataset.shape[1]
+            # 旧文件已保存的滤波前缀保留；续采从此只追加 raw，不再写滤波数据。
+            self._legacy_filtered_dataset = self._file.get("eeg/filtered_uv")
             self._events_dataset = self._file["events/table"]
             self._haptic_dataset = self._file["haptics/commands"]
             self._trials_dataset = self._file["trials/table"]
@@ -187,6 +189,13 @@ class SessionWriter:
                 key=info.metadata.get("ended_at_utc") or info.metadata["created_at_utc"],
             )
             self.recovery = self.rollback_incomplete_trials()
+            protocol = dict(info.protocol)
+            protocol["saved_signals"] = ["raw_uv"]
+            if self._legacy_filtered_dataset is not None:
+                protocol["legacy_filtered_samples"] = len(self._legacy_filtered_dataset)
+            self._file["protocol/json"][()] = json.dumps(protocol, ensure_ascii=False, sort_keys=True)
+            self._file.attrs["schema_version"] = HDF5_SCHEMA_VERSION
+            self._file.flush()
             return self
         except BaseException:
             self._file.close()
@@ -200,8 +209,13 @@ class SessionWriter:
         self._require_open()
         self.flush_samples()
         cut = recovery_cut(self._trial_rows, self._events_dataset[:])
-        self._raw_dataset.resize((cut.samples, CHANNEL_COUNT))
-        self._filtered_dataset.resize((cut.samples, CHANNEL_COUNT))
+        self._raw_dataset.resize((cut.samples, self.channels))
+        legacy = getattr(self, "_legacy_filtered_dataset", None)
+        if legacy is not None:
+            legacy.resize((min(cut.samples, len(legacy)), self.channels))
+            protocol = json.loads(self._file["protocol/json"][()])
+            protocol["legacy_filtered_samples"] = len(legacy)
+            self._file["protocol/json"][()] = json.dumps(protocol, ensure_ascii=False, sort_keys=True)
         self._flushed_sample_count = cut.samples
         self._events_dataset.resize((cut.events,))
         self._event_count = cut.events
@@ -256,10 +270,12 @@ class SessionWriter:
         protocol = {
             **self.config.protocol,
             "sample_rate_hz": SAMPLE_RATE_HZ,
-            "channel_count": CHANNEL_COUNT,
-            "channel_labels": list(CHANNEL_LABELS),
+            "channel_count": self.channels,
+            "channel_labels": list(self.stream.channel_labels),
             "signal_unit": "uV",
-            "raw_signal": "decoded physical values before software filtering",
+            "raw_signal": "received values before local software filtering; upstream processing unknown",
+            "saved_signals": ["raw_uv"],
+            "acquisition": self.stream.metadata(demo=self._runtime["demo"]),
             "filtered_signal": {
                 "notch_hz": NOTCH_HZ,
                 "notch_q": NOTCH_Q,
@@ -268,7 +284,6 @@ class SessionWriter:
                 "cascade_count": BANDPASS_CASCADE_COUNT,
             },
             "display_limit_uv": DISPLAY_LIMIT_UV,
-            "adc_uv_per_lsb": ADC_UV_PER_LSB,
             "class_codes": {str(key): value for key, value in CLASS_NAMES.items()},
             "event_codes": {str(key): value for key, value in EVENT_NAMES.items()},
             "sample_index_convention": "zero-based; slices are half-open [start:end)",
@@ -293,21 +308,18 @@ class SessionWriter:
         eeg_group.attrs["sample_rate_hz"] = SAMPLE_RATE_HZ
         eeg_group.attrs["units"] = "uV"
         eeg_group.attrs["channel_labels"] = np.asarray(
-            CHANNEL_LABELS,
+            self.stream.channel_labels,
             dtype=h5py.string_dtype(encoding="utf-8"),
         )
         dataset_options = {
-            "shape": (0, CHANNEL_COUNT),
-            "maxshape": (None, CHANNEL_COUNT),
-            "chunks": (HDF5_WRITE_BLOCK_SAMPLES, CHANNEL_COUNT),
+            "shape": (0, self.channels),
+            "maxshape": (None, self.channels),
+            "chunks": (HDF5_WRITE_BLOCK_SAMPLES, self.channels),
             "dtype": np.float32,
             "compression": "lzf",
             "shuffle": True,
         }
         self._raw_dataset = eeg_group.create_dataset("raw_uv", **dataset_options)
-        self._filtered_dataset = eeg_group.create_dataset(
-            "filtered_uv", **dataset_options
-        )
 
         events_group = root.create_group("events")
         events_group.attrs["event_code_map_json"] = json.dumps(
@@ -414,21 +426,18 @@ class SessionWriter:
     def append_samples(
         self,
         raw_uv: np.ndarray,
-        filtered_uv: np.ndarray,
     ) -> None:
         self._require_open()
         raw = np.asarray(raw_uv, dtype=np.float32)
-        filtered = np.asarray(filtered_uv, dtype=np.float32)
-        expected_prefix = (CHANNEL_COUNT,)
+        expected_prefix = (self.channels,)
         if raw.ndim != 2 or raw.shape[0:1] != expected_prefix:
-            raise ValueError(f"raw EEG shape must be ({CHANNEL_COUNT}, samples)")
-        if filtered.shape != raw.shape:
-            raise ValueError("raw and filtered EEG shapes differ")
+            raise ValueError(f"raw EEG shape must be ({self.channels}, samples)")
+        if not np.isfinite(raw).all():
+            raise ValueError("raw EEG must contain finite values")
         if raw.shape[1] == 0:
             return
 
         self._raw_pending.append(raw.copy())
-        self._filtered_pending.append(filtered.copy())
         self._pending_sample_count += raw.shape[1]
         if self._pending_sample_count >= HDF5_WRITE_BLOCK_SAMPLES:
             self.flush_samples()
@@ -438,16 +447,12 @@ class SessionWriter:
         if not self._raw_pending:
             return
         raw = np.hstack(self._raw_pending).T
-        filtered = np.hstack(self._filtered_pending).T
         start = self._flushed_sample_count
         end = start + raw.shape[0]
-        self._raw_dataset.resize((end, CHANNEL_COUNT))
-        self._filtered_dataset.resize((end, CHANNEL_COUNT))
+        self._raw_dataset.resize((end, self.channels))
         self._raw_dataset[start:end] = raw
-        self._filtered_dataset[start:end] = filtered
         self._flushed_sample_count = end
         self._raw_pending.clear()
-        self._filtered_pending.clear()
         self._pending_sample_count = 0
         self._file.flush()
 
@@ -640,12 +645,13 @@ def write_session_readme(
     status: str,
     quality: dict[str, Any] | None = None,
     termination_reason: str = "",
+    stream: EEGStreamConfig | None = None,
 ) -> Path:
     readme_path = config.output_dir / SESSION_README_FILENAME
     history = read_interruption_history(readme_path)
     if config.self_learning_enabled:
         from self_learning.documentation import write_readme
-        path = write_readme(config, status=status, quality=quality, reason=termination_reason)
+        path = write_readme(config, status=status, quality=quality, reason=termination_reason, stream=stream)
         if history:
             path.write_text(path.read_text(encoding="utf-8").rstrip() + "\n\n" + history, encoding="utf-8")
         return path
@@ -656,7 +662,10 @@ def write_session_readme(
     )
     quality = quality or {}
     timing = config.protocol
+    stream = stream or EEGStreamConfig()
     content = template.format(
+        channel_count=timing.get("channel_count", stream.channels),
+        channel_labels=", ".join(timing.get("channel_labels", stream.channel_labels)),
         preparation_s=timing["preparation_seconds"],
         rest_s=timing["rest_seconds"],
         cue_end_s=timing["rest_seconds"] + timing["cue_visible_seconds"],

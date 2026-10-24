@@ -84,6 +84,21 @@ class ResumeInfo:
         if self.feedback and bool(self.feedback["load_info"]["mock"]) != mock_teacher:
             raise ValueError("原实验 Teacher 的真实/模拟模式与当前服务不一致")
 
+    def check_stream(self, stream: constants.EEGStreamConfig, *, demo: bool) -> None:
+        if (
+            self.protocol["channel_count"] != stream.channels
+            or self.protocol["channel_labels"] != list(stream.channel_labels)
+        ):
+            raise ValueError("原文件通道数或顺序与当前 EEG 配置不一致，请按原配置启动服务")
+        acquisition = self.protocol.get("acquisition", {})
+        source = acquisition.get("source", "simulated" if self.metadata["runtime"]["demo"] else "ble")
+        if source != ("simulated" if demo else "websocket"):
+            raise ValueError("原文件采集源与当前服务不一致，旧 BLE 数据不能与新 WebSocket 设备混合续采")
+        if self.config.self_learning_enabled:
+            previous = acquisition.get("teacher_channels", list(range(1, 9)))
+            if previous != list(stream.model_channels(demo=demo)):
+                raise ValueError("Teacher 通道映射与原实验不一致")
+
     def payload(self) -> dict:
         c, total, n = self.cut.completed, self.config.total_trials, self.config.break_every_trials
         remaining = total - c
@@ -131,7 +146,7 @@ def parse_resume_path(value: str) -> ResumeInfo:
         with h5py.File(path, "r") as root:
             if root.attrs.get("schema_name") != constants.HDF5_SCHEMA_NAME:
                 raise ValueError("不是本系统的实验 H5 文件")
-            if str(root.attrs.get("schema_version")) not in {"1.1", "1.2", "1.3"}:
+            if str(root.attrs.get("schema_version")) not in {"1.1", "1.2", "1.3", "1.4"}:
                 raise ValueError("暂不支持此 H5 版本")
             if root.attrs.get("status") == "complete":
                 raise ValueError("该实验已经 complete，无需继续")
@@ -168,9 +183,7 @@ def parse_resume_path(value: str) -> ResumeInfo:
             ):
                 raise ValueError("指令和黑屏时长与任务窗口不一致")
             expected_signal = {
-                "sample_rate_hz": constants.SAMPLE_RATE_HZ, "channel_count": constants.CHANNEL_COUNT,
-                "channel_labels": list(constants.CHANNEL_LABELS), "signal_unit": "uV",
-                "adc_uv_per_lsb": constants.ADC_UV_PER_LSB,
+                "sample_rate_hz": constants.SAMPLE_RATE_HZ, "signal_unit": "uV",
                 "filtered_signal": {
                     "notch_hz": constants.NOTCH_HZ, "notch_q": constants.NOTCH_Q,
                     "bandpass_hz": [constants.BANDPASS_LOW_HZ, constants.BANDPASS_HIGH_HZ],
@@ -180,6 +193,8 @@ def parse_resume_path(value: str) -> ResumeInfo:
             }
             if any(protocol[k] != v for k, v in expected_signal.items()):
                 raise ValueError("文件的采样率、通道、单位或显示滤波设置与当前采集程序不兼容")
+            channels = protocol["channel_count"]
+            constants.EEGStreamConfig(channels=channels, channel_labels=tuple(protocol["channel_labels"]))
             for key, dtype in (("trials/table", TRIAL_DTYPE), ("events/table", EVENT_DTYPE),
                                ("haptics/commands", HAPTIC_COMMAND_DTYPE)):
                 dataset = root[key]
@@ -187,12 +202,19 @@ def parse_resume_path(value: str) -> ResumeInfo:
                     raise ValueError(f"数据表格式不兼容：{key}")
                 if key != "trials/table" and dataset.maxshape != (None,):
                     raise ValueError(f"数据表不支持追加：{key}")
-            raw, filtered = root["eeg/raw_uv"], root["eeg/filtered_uv"]
-            if raw.shape != filtered.shape or raw.ndim != 2 or raw.shape[1] != constants.CHANNEL_COUNT:
-                raise ValueError("原始与滤波 EEG 维度不一致")
-            for dataset in (raw, filtered):
-                if dataset.dtype != np.dtype("float32") or dataset.maxshape != (None, constants.CHANNEL_COUNT):
+            raw, filtered = root["eeg/raw_uv"], root.get("eeg/filtered_uv")
+            datasets = (raw,) if filtered is None else (raw, filtered)
+            for dataset in datasets:
+                if dataset.ndim != 2 or dataset.shape[1] != channels:
+                    raise ValueError("EEG 维度与协议不一致")
+                if dataset.dtype != np.dtype("float32") or dataset.maxshape != (None, channels):
                     raise ValueError("EEG 格式不支持追加")
+            if filtered is not None:
+                expected_length = protocol.get("legacy_filtered_samples", len(raw))
+                if len(filtered) != expected_length or len(filtered) > len(raw):
+                    raise ValueError("历史滤波数据长度与协议不一致")
+            elif str(root.attrs.get("schema_version")) != "1.4":
+                raise ValueError("旧版文件缺少滤波数据")
             trials, events = root["trials/table"][:], root["events/table"][:]
             if len(trials) != config.total_trials:
                 raise ValueError("trial 计划不完整")

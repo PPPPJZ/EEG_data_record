@@ -10,7 +10,7 @@ pydantic>=2.7,<3
 PyYAML>=6.0.2,<7
 scipy==1.17.1
 uvicorn>=0.30,<1
-# 显式提供实时波形 WebSocket 支持，避免依赖 uvicorn 的可选加速扩展。
+# 厂家 EEG 推流接收与浏览器实时波形共用 WebSocket 依赖。
 websockets>=12,<18
 
 # ADFCNN 训练与实时 Feedback 推理。
