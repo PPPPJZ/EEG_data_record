@@ -1476,6 +1476,10 @@ def main() -> None:
     parser.add_argument("--eeg-ws-host", default=EEG_WS_HOST, help="厂家推流监听地址")
     parser.add_argument("--eeg-ws-port", type=int, default=EEG_WS_PORT, help="厂家推流监听端口，与网页端口独立")
     parser.add_argument("--eeg-channels", type=int, default=None, help="全部采集通道数，真实默认 32，演示默认 8")
+    parser.add_argument(
+        "--eeg-channel-labels", default=None,
+        help="按厂家 data 行顺序指定通道名（逗号分隔）；32 通道默认使用 YSEEG RAW32 电极名称",
+    )
     parser.add_argument("--eeg-timeout", type=float, default=EEG_WS_TIMEOUT_SECONDS, help="有效 EEG 断流超时秒数")
     parser.add_argument("--teacher-channels", default=None, help="按模型电极顺序指定 8 个采集通道号（从 1 开始，逗号分隔）")
     parser.add_argument("--teacher-device", default="cuda:0", help="Teacher: cuda:0 / cpu")
@@ -1500,6 +1504,10 @@ def main() -> None:
         stream = EEGStreamConfig(
             host=args.eeg_ws_host, port=args.eeg_ws_port,
             channels=args.eeg_channels if args.eeg_channels is not None else (CHANNEL_COUNT if args.demo else EEG_WS_CHANNELS),
+            channel_labels=(
+                tuple(label.strip() for label in args.eeg_channel_labels.split(","))
+                if args.eeg_channel_labels is not None else ()
+            ),
             timeout_seconds=args.eeg_timeout,
             teacher_channels=(
                 tuple(int(i.strip()) for i in args.teacher_channels.split(","))

@@ -39,6 +39,33 @@ def address(source):
 
 
 class DecoderTest(unittest.TestCase):
+    def test_vendor_electrode_order_reaches_browser_state(self):
+        # 厂家 RAW32/g1 表，按 channel_num 排序；不可按头皮位置重排。
+        expected = (
+            "F3", "Fp1", "PG1", "T5", "T3", "F7", "T1", "A1",
+            "Fp2", "PG2", "Pz", "Cz", "Fz", "C3", "P3", "O1",
+            "T2", "T6", "T4", "F8", "F4", "C4", "P4", "O2",
+            "X7", "X6", "X5", "X4", "X3", "X2", "X1", "A2",
+        )
+        service = ApplicationService()
+        self.assertEqual(service.stream.channel_labels, expected)
+        self.assertEqual(service.state_payload()["eeg"]["channel_labels"], list(expected))
+        self.assertEqual(
+            ApplicationService(demo=True).stream.channel_labels,
+            tuple(f"CH{i}" for i in range(1, 9)),
+        )
+
+    def test_explicit_channel_labels_override_vendor_defaults(self):
+        legacy = tuple(f"CH{i}" for i in range(1, 33))
+        self.assertEqual(EEGStreamConfig(channel_labels=legacy).channel_labels, legacy)
+        self.assertEqual(
+            EEGStreamConfig(channels=3, channel_labels=("C3", "Cz", "C4")).channel_labels,
+            ("C3", "Cz", "C4"),
+        )
+        for labels in (("C3",), ("C3", "C3", "C4"), ("C3", "", "C4")):
+            with self.subTest(labels=labels), self.assertRaises(ValueError):
+                EEGStreamConfig(channels=3, channel_labels=labels)
+
     def test_bad_shapes_rates_and_values_rejected(self):
         source = WebSocketEEGSource(lambda *_: None, lambda *_: None)
         for data, rate in (
@@ -212,6 +239,10 @@ class WebSocketSourceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(session["status"], "complete")
                 self.assertEqual(session["protocol"]["trial_seconds"], 8)
                 self.assertEqual(session["protocol"]["channel_count"], CHANNELS)
+                self.assertEqual(
+                    session["protocol"]["channel_labels"],
+                    service.state_payload()["eeg"]["channel_labels"],
+                )
                 np.testing.assert_array_equal(
                     session["raw_uv"], np.hstack(recorded).T.astype(np.float32),
                 )
@@ -219,6 +250,10 @@ class WebSocketSourceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(session["trials"]["completed"].all())
                 with h5py.File(Path(temp) / "motor_imagery.h5") as handle:
                     self.assertEqual(set(handle["eeg"]), {"raw_uv"})
+                    self.assertEqual(
+                        list(handle["eeg"].attrs["channel_labels"]),
+                        list(service.stream.channel_labels),
+                    )
             finally:
                 if sender:
                     sender.cancel()

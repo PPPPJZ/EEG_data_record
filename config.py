@@ -10,6 +10,14 @@ from typing import Final
 EEG_WS_HOST: Final = "127.0.0.1"
 EEG_WS_PORT: Final = 8765
 EEG_WS_CHANNELS: Final = 32
+# YSNeuro_EEG_32 厂家 data 行顺序，核对自厂家 eeg.db 的 RAW32 / g1（2026-11-15）。
+# X7–X1 为厂家的扩展通道名称；不要替换成未经确认的头皮电极。
+EEG_WS_CHANNEL_LABELS: Final = (
+    "F3", "Fp1", "PG1", "T5", "T3", "F7", "T1", "A1",
+    "Fp2", "PG2", "Pz", "Cz", "Fz", "C3", "P3", "O1",
+    "T2", "T6", "T4", "F8", "F4", "C4", "P4", "O2",
+    "X7", "X6", "X5", "X4", "X3", "X2", "X1", "A2",
+)
 EEG_WS_TIMEOUT_SECONDS: Final = 3.0
 EEG_WS_MAX_MESSAGE_BYTES: Final = 8 * 1024 * 1024
 EEG_WS_MAX_CHUNK_SAMPLES: Final = 2500
@@ -148,7 +156,10 @@ class EEGStreamConfig:
             raise ValueError("EEG 通道数必须在 1–256 之间")
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("EEG 断流超时必须为有限正数")
-        labels = tuple(self.channel_labels) or tuple(f"CH{i + 1}" for i in range(self.channels))
+        labels = tuple(self.channel_labels) or (
+            EEG_WS_CHANNEL_LABELS if self.channels == len(EEG_WS_CHANNEL_LABELS)
+            else tuple(f"CH{i + 1}" for i in range(self.channels))
+        )
         if len(labels) != self.channels or len(set(labels)) != self.channels or not all(labels):
             raise ValueError("EEG 通道标签必须与通道数一致且不重复")
         object.__setattr__(self, "channel_labels", labels)

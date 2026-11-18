@@ -285,18 +285,14 @@ textarea:focus-visible {
 }
 
 .device-view {
-  min-height: 100vh;
-  display: grid;
-  grid-template-rows: auto auto auto auto auto minmax(540px, 1fr) auto;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 540px;
+  display: flex;
+  flex-direction: column;
 }
 
-.device-view > .device-header { grid-row: 1; }
-.device-view > .session-strip { grid-row: 2; }
-.device-view > .device-message { grid-row: 3; }
-.device-view > .haptic-panel { grid-row: 4; }
-.device-view > #feedbackPreview { grid-row: 5; }
-.device-view > .waveform-area { grid-row: 6; }
-.device-view > .signal-footer { grid-row: 7; }
+.device-view > * { flex-shrink: 0; }
 
 .device-actions { flex-wrap: wrap; }
 .feedback-area { position: absolute; inset: 0; }
@@ -436,8 +432,9 @@ textarea:focus-visible {
 }
 
 .waveform-area {
-  min-height: 540px;
-  max-height: 75vh;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
   padding: 10px 20px 8px;
   overflow: auto;
   background: #f8fafb;
@@ -743,7 +740,6 @@ textarea:focus-visible {
   }
 
   .waveform-area {
-    min-height: 620px;
     padding: 8px;
   }
 
